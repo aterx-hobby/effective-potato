@@ -39,7 +39,7 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
             },
         }
 
-        res = await server.call_tool("launch_and_screenshot", args)
+        res = await server.call_tool("workspace_launch_and_screenshot", args)
         assert isinstance(res, list) and res, "Expected a non-empty TextContent list"
         text = res[0].text
 
@@ -77,6 +77,6 @@ async def test_launch_and_screenshot_requires_launch_command():
     server.container_manager = fake
     try:
         with pytest.raises(ValueError):
-            await server.call_tool("launch_and_screenshot", {"delay_seconds": 1})
+            await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
     finally:
         server.container_manager = orig_cm

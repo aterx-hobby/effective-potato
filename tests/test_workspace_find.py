@@ -21,7 +21,7 @@ async def test_workspace_find_command_and_prune():
     orig_cm = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("potato_workspace_find", {"path": "projects/demo"})
+        res = await server.call_tool("workspace_find", {"path": "projects/demo"})
         assert isinstance(res, list) and res
         txt = res[0].text
         assert "Exit code: 0" in txt
@@ -34,7 +34,7 @@ async def test_workspace_find_command_and_prune():
         assert "\\( -name .git -o -name '*venv*' -o -name '*_env*' \\) -prune" in cmd
 
         # With name and type filters
-        res2 = await server.call_tool("potato_workspace_find", {"path": "projects/demo", "name": "*.py", "type": "file"})
+        res2 = await server.call_tool("workspace_find", {"path": "projects/demo", "name": "*.py", "type": "file"})
         cmd2 = fake.last_command
         assert " -type f -name '*.py' -print" in cmd2
     finally:

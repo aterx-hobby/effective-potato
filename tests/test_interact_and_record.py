@@ -36,7 +36,7 @@ async def test_interact_and_record_builds_script(monkeypatch):
             "output_basename": "rec_test",
         }
 
-        res = await server.call_tool("potato_workspace_interact_and_record", args)
+        res = await server.call_tool("workspace_interact_and_record", args)
         assert isinstance(res, list) and res, "Expected a response"
         text = res[0].text
         # Response should be JSON-like containing paths
