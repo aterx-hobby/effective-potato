@@ -2,13 +2,66 @@
 
 import os
 import logging
-import shutil
+import re
 from pathlib import Path
 from typing import Optional
 import docker
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
+
+
+def validate_and_load_env_file(env_file_path: Path) -> dict[str, str]:
+    """Validate and load environment variables from a .env file.
+    
+    Args:
+        env_file_path: Path to the .env file
+        
+    Returns:
+        Dictionary of environment variable name -> value
+        
+    Raises:
+        ValueError: If the file contains invalid content (not just env vars)
+    """
+    env_vars = {}
+    
+    if not env_file_path.exists():
+        return env_vars
+    
+    content = env_file_path.read_text()
+    lines = content.strip().split('\n')
+    
+    # Pattern for valid environment variable assignments
+    # Allows: VAR=value, VAR="value", VAR='value', export VAR=value
+    env_pattern = re.compile(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+    
+    for line_num, line in enumerate(lines, 1):
+        line = line.strip()
+        
+        # Skip empty lines and comments
+        if not line or line.startswith('#'):
+            continue
+        
+        # Check if line matches environment variable pattern
+        match = env_pattern.match(line)
+        if not match:
+            raise ValueError(
+                f"Invalid content in {env_file_path} at line {line_num}: '{line}'\n"
+                f"Only environment variable assignments are allowed (e.g., VAR=value)"
+            )
+        
+        var_name = match.group(1)
+        var_value = match.group(2).strip()
+        
+        # Remove surrounding quotes if present
+        if var_value.startswith('"') and var_value.endswith('"'):
+            var_value = var_value[1:-1]
+        elif var_value.startswith("'") and var_value.endswith("'"):
+            var_value = var_value[1:-1]
+        
+        env_vars[var_name] = var_value
+    
+    return env_vars
 
 
 class ContainerManager:
@@ -38,50 +91,46 @@ class ContainerManager:
         # Ensure workspace directories exist
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         (self.workspace_dir / ".tmp_agent_scripts").mkdir(parents=True, exist_ok=True)
+        
+        # Load and validate environment variables from .env file
+        self.env_vars: dict[str, str] = {}
+        if self.env_file.exists():
+            try:
+                self.env_vars = validate_and_load_env_file(self.env_file)
+                logger.info(f"Loaded {len(self.env_vars)} environment variables from {self.env_file}")
+            except ValueError as e:
+                logger.error(f"Failed to load environment file: {e}")
+                raise
+        else:
+            logger.warning(
+                f"Environment file not found: {self.env_file}. "
+                f"No custom environment variables will be set."
+            )
+            logger.warning(
+                f"See {self.sample_env_file} for how to format a local/.env file"
+            )
 
     def build_image(self) -> None:
         """Build the Docker image with Ubuntu 24.04 and required packages."""
         logger.info("Building Docker image...")
 
-        # Check if environment file exists
-        env_script_path = Path("environment.sh")
-        if self.env_file.exists():
-            logger.info(f"Found environment file: {self.env_file}")
-            shutil.copy(self.env_file, env_script_path)
-        else:
-            logger.warning(
-                f"No custom environment data is being copied. "
-                f"Environment file not found: {self.env_file}"
-            )
-            logger.warning(
-                f"See {self.sample_env_file} for how to format a local/.env file"
-            )
-            # Create an empty environment.sh file
-            env_script_path.write_text("")
+        # Build the image
+        dockerfile_path = Path("Dockerfile").absolute()
+        build_context = Path(".").absolute()
 
-        try:
-            # Build the image
-            dockerfile_path = Path("Dockerfile").absolute()
-            build_context = Path(".").absolute()
+        image, build_logs = self.client.images.build(
+            path=str(build_context),
+            dockerfile=str(dockerfile_path),
+            tag=self.image_name,
+            rm=True,
+            forcerm=True,
+        )
 
-            image, build_logs = self.client.images.build(
-                path=str(build_context),
-                dockerfile=str(dockerfile_path),
-                tag=self.image_name,
-                rm=True,
-                forcerm=True,
-            )
+        for log in build_logs:
+            if "stream" in log:
+                logger.debug(log["stream"].strip())
 
-            for log in build_logs:
-                if "stream" in log:
-                    logger.debug(log["stream"].strip())
-
-            logger.info(f"Successfully built image: {self.image_name}")
-
-        finally:
-            # Clean up temporary environment script
-            if env_script_path.exists():
-                env_script_path.unlink()
+        logger.info(f"Successfully built image: {self.image_name}")
 
     def start_container(self) -> Container:
         """Start the Docker container with workspace mounted.
@@ -140,8 +189,21 @@ class ContainerManager:
         script_dir = self.workspace_dir / ".tmp_agent_scripts"
         script_path = script_dir / f"task_{task_id}.sh"
 
-        # Write the script
-        script_content = f"#!/bin/bash\n\n{command}\n"
+        # Build script content with environment variables prefixed
+        script_content = "#!/bin/bash\n\n"
+        
+        # Add environment variable exports at the beginning
+        for var_name, var_value in self.env_vars.items():
+            # Escape single quotes in the value
+            escaped_value = var_value.replace("'", "'\\''")
+            script_content += f"export {var_name}='{escaped_value}'\n"
+        
+        if self.env_vars:
+            script_content += "\n"
+        
+        # Add the actual command
+        script_content += f"{command}\n"
+        
         script_path.write_text(script_content)
 
         # Make it executable
