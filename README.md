@@ -55,6 +55,26 @@ The server will:
 2. Start the container
 3. Listen for MCP tool requests via stdio
 
+### MCP Configuration
+
+To use effective-potato with an MCP client (like Claude Desktop), add the following to your MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "effective-potato": {
+      "command": "/path/to/effective-potato/venv/bin/effective-potato",
+      "args": [],
+      "cwd": "/path/to/effective-potato"
+    }
+  }
+}
+```
+
+Replace `/path/to/effective-potato` with the actual path to your installation.
+
+An example configuration file is provided in `mcp-config.json`.
+
 ### Available Tools
 
 #### execute_command

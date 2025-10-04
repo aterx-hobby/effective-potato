@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "effective-potato": {
+      "command": "effective-potato",
+      "args": [],
+      "env": {},
+      "cwd": ".",
+      "description": "Sandboxed Ubuntu 24.04 container for secure command execution"
+    }
+  }
+}
