@@ -54,7 +54,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="launch_and_screenshot",
-            description="Launch an X11 application and take a fullscreen screenshot via xfce4-screenshooter",
+            description=(
+                "Self-contained: launches the process and captures a fullscreen screenshot via xfce4-screenshooter. "
+                "Do not pre-launch the app outside this tool; provide everything needed here."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -70,6 +73,15 @@ async def list_tools() -> list[Tool]:
                     "filename": {
                         "type": "string",
                         "description": "Optional filename for the screenshot (png). When omitted, a timestamped name is used.",
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Optional workspace-relative directory to cd into before launching (relative to /workspace)",
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": "Optional environment variables to export for the launched process",
+                        "additionalProperties": {"type": "string"}
                     }
                 },
                 "required": ["launch_command"],
@@ -227,6 +239,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         launch_command = arguments.get("launch_command")
         delay = int(arguments.get("delay_seconds", 2))
         filename = arguments.get("filename")
+        working_dir = arguments.get("working_dir")
+        env_map = arguments.get("env") or {}
         if not launch_command:
             raise ValueError("'launch_command' is required")
         
@@ -235,12 +249,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import datetime as dt
         shot_dir = "/workspace/.agent/screenshots"
         # Create directory and run command
-        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        ts = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S")
         out_name = filename or f"screenshot_{ts}.png"
         out_path = f"{shot_dir}/{out_name}"
         
+        # Prepare optional env exports and working directory change
+        export_snippets = []
+        if isinstance(env_map, dict):
+            for k, v in env_map.items():
+                try:
+                    ks = str(k)
+                    vs = str(v).replace("'", "'\\''")
+                    export_snippets.append(f"export {ks}='{vs}'")
+                except Exception:
+                    continue
+        exports = ("; ".join(export_snippets) + "; ") if export_snippets else ""
+
+        cd_snippet = ""
+        if working_dir:
+            wd = str(working_dir).replace("'", "'\\''")
+            cd_snippet = f"cd /workspace && cd -- '{wd}' && "
+
         cmd = (
             "mkdir -p /workspace/.agent/screenshots && "
+            f"{cd_snippet}{exports}"
             f"({launch_command}) >/tmp/launch.log 2>&1 & "
             f"sleep {delay}; "
             "export DISPLAY=:0; "
