@@ -650,7 +650,27 @@ class ContainerManager:
         command = f"cd /workspace && gh repo clone {owner}/{repo}"
         
         # Execute using the standard execute_command method
-        return self.execute_command(command, task_id)
+        exit_code, output = self.execute_command(command, task_id)
+        # If successful, add to tracked repos (best-effort)
+        if exit_code == 0:
+            description: str | None = None
+            try:
+                # Attempt to read description via gh quickly
+                info_cmd = (
+                    "gh repo view "
+                    f"{owner}/{repo}"
+                    " --json description -q .description || true"
+                )
+                info_code, info_out = self.execute_command(info_cmd, f"info_{uuid.uuid4()}")
+                if info_code == 0 and info_out:
+                    description = info_out.strip()
+            except Exception:
+                pass
+            try:
+                self.add_tracked_repo(owner, repo, path=repo, description=description)
+            except Exception as e:
+                logger.warning(f"Failed to add tracked repo for {owner}/{repo}: {e}")
+        return exit_code, output
 
     def cleanup(self) -> None:
         """Clean up resources."""
@@ -981,22 +1001,85 @@ class ContainerManager:
         except Exception as e:
             logger.warning(f"Failed to save tracked repos: {e}")
 
-    def add_tracked_repo(self, owner: str, repo: str, description: str | None = None, shorthand: str | None = None) -> None:
+    def add_tracked_repo(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        path: str | None = None,
+        description: str | None = None,
+        shorthand: str | None = None,
+    ) -> None:
+        """Add or update a tracked repository record.
+
+        Args:
+            owner: GitHub owner/org
+            repo: Repository name
+            path: Workspace-relative directory name. Defaults to repo.
+            description: Optional description
+            shorthand: Optional display name; auto-deduped
+        """
+        from datetime import datetime, timezone
+
         repos = self.load_tracked_repos()
-        shorthand_base = shorthand or repo
-        name = shorthand_base
-        existing = {r.get("name") for r in repos}
-        if name in existing:
-            i = 2
-            while f"{shorthand_base}-{i}" in existing:
-                i += 1
-            name = f"{shorthand_base}-{i}"
-        entry = {
-            "name": name,
-            "full": f"{owner}/{repo}",
-            "owner": owner,
-            "repo": repo,
-            "description": description or "",
-        }
-        repos.append(entry)
+        full = f"{owner}/{repo}"
+        # Default path is repository name
+        repo_path = path or repo
+
+        # Try update existing by full
+        updated = False
+        for r in repos:
+            if r.get("full") == full:
+                r["owner"] = owner
+                r["repo"] = repo
+                r["path"] = repo_path
+                if description is not None:
+                    r["description"] = description
+                r["updated_at"] = datetime.now(timezone.utc).isoformat()
+                updated = True
+                break
+
+        if not updated:
+            shorthand_base = shorthand or repo
+            name = shorthand_base
+            existing_names = {r.get("name") for r in repos}
+            if name in existing_names:
+                i = 2
+                while f"{shorthand_base}-{i}" in existing_names:
+                    i += 1
+                name = f"{shorthand_base}-{i}"
+            entry = {
+                "name": name,
+                "full": full,
+                "owner": owner,
+                "repo": repo,
+                "path": repo_path,
+                "description": description or "",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            repos.append(entry)
+
         self.save_tracked_repos(repos)
+
+    def list_local_repositories(self) -> list[dict]:
+        """List repositories tracked in the workspace and detect presence.
+
+        Returns a list of dicts including:
+          - owner, repo, full, name, path
+          - present (bool): whether the directory currently exists
+          - abs_path (str): absolute path on disk
+        """
+        repos = self.load_tracked_repos()
+        results: list[dict] = []
+        for r in repos:
+            rel = r.get("path") or r.get("repo")
+            try:
+                abs_path = self._resolve_workspace_path(rel)
+            except Exception:
+                abs_path = (self.workspace_dir / str(rel)).resolve()
+            present = abs_path.exists() and abs_path.is_dir()
+            out = dict(r)
+            out["present"] = bool(present)
+            out["abs_path"] = str(abs_path)
+            results.append(out)
+        return results

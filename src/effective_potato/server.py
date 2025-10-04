@@ -13,6 +13,7 @@ from .web import (
     start_http_server,
     get_server_config,
     build_screenshot_url,
+    get_tool_schema_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,22 @@ async def list_tools() -> list[Tool]:
                     "extra_env": {"type": "object", "description": "Optional environment variables for the pipeline run"}
                 },
                 "required": ["steps"],
+            },
+        ),
+        Tool(
+            name="list_local_repositories",
+            description="List repositories tracked in the workspace (.agent/track_repos.json) and whether their directories currently exist",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="potato_get_toolset_schema",
+            description="Return a URL to an OpenAPI schema for the available tools. The LLM should use this URL to understand tool descriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
     ]
@@ -343,6 +360,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         flush_low_level(buf, results)
 
         return [TextContent(type="text", text=json.dumps({"results": results}, ensure_ascii=False, indent=2))]
+    elif name == "list_local_repositories":
+        import json
+        items = container_manager.list_local_repositories()
+        return [TextContent(type="text", text=json.dumps({"items": items}, ensure_ascii=False, indent=2))]
+    elif name == "potato_get_toolset_schema":
+        import json
+        url = get_tool_schema_url()
+        message = (
+            "Use this OpenAPI schema URL to discover and understand the available tools. "
+            "The schema is intended for tool descriptions and parameters."
+        )
+        return [TextContent(type="text", text=json.dumps({"url": url, "note": message}, ensure_ascii=False, indent=2))]
     
     else:
         raise ValueError(f"Unknown tool: {name}")

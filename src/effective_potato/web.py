@@ -87,6 +87,21 @@ def build_screenshot_url(public_host: str, port: int, filename: str) -> str:
     return f"{build_base_url(public_host, port)}/screenshots/{quote(fname)}"
 
 
+def get_tool_schema_url() -> str:
+    """Return the tool schema URL from env or a sensible default.
+
+    EFFECTIVE_POTATO_TOOL_SCHEMA_URL may be set directly. If not set,
+    the default is built using the detected public host:
+        http://$EFFECTIVE_POTATO_HOSTNAME:8000/effective-potato/openapi.json
+    where $EFFECTIVE_POTATO_HOSTNAME is the result of detect_public_host().
+    """
+    env_url = os.getenv("EFFECTIVE_POTATO_TOOL_SCHEMA_URL")
+    if env_url:
+        return env_url.strip()
+    host = detect_public_host()
+    return f"http://{host}:8000/effective-potato/openapi.json"
+
+
 def get_http_log_level() -> Optional[int]:
     """Parse EFFECTIVE_POTATO_HTTP_LOG into a logging level.
 
