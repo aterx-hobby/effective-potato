@@ -104,6 +104,35 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="potato_workspace_interact_and_record",
+            description=(
+                "Focus a window by title, send a sequence of key inputs, and record the desktop as a sequence of screenshots "
+                "captured every ~500ms. At the end of the capture window, compile frames into a webm."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "window_title": {"type": "string", "description": "Substring to match the target window title (xdotool search --any)"},
+                    "inputs": {
+                        "type": "array",
+                        "description": "Ordered list of key sequences to send (xdotool key syntax). Each item may include 'keys' and optional 'delay_ms'.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "keys": {"type": "string"},
+                                "delay_ms": {"type": "integer", "default": 100}
+                            },
+                            "required": ["keys"]
+                        }
+                    },
+                    "duration_seconds": {"type": "integer", "description": "Capture window length (default 30)", "default": 30},
+                    "frame_interval_ms": {"type": "integer", "description": "Capture interval in milliseconds (default 500)", "default": 500},
+                    "output_basename": {"type": "string", "description": "Base filename (without extension) for output video and frames", "default": "session"}
+                },
+                "required": ["window_title", "inputs"],
+            },
+        ),
     ]
     
     # Add GitHub tools if GitHub CLI is available
@@ -300,6 +329,72 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "Invoke individual tools directly in sequence instead."
         )
         return [TextContent(type="text", text=msg)]
+    elif name == "potato_workspace_interact_and_record":
+        import json
+        window_title = arguments.get("window_title")
+        inputs = arguments.get("inputs") or []
+        duration = int(arguments.get("duration_seconds", 30))
+        interval = int(arguments.get("frame_interval_ms", 500))
+        base = arguments.get("output_basename", "session")
+        if not window_title or not isinstance(inputs, list) or not inputs:
+            raise ValueError("'window_title' and non-empty 'inputs' are required")
+
+        # Build a script that focuses the window, sends inputs, and records frames using xfce4-screenshooter
+        # Frames saved to /workspace/.agent/screenshots/<base>_frames/frame_%06d.png
+        frames_dir = f"/workspace/.agent/screenshots/{base}_frames"
+        video_out = f"/workspace/.agent/screenshots/{base}.webm"
+        pattern = window_title.replace("'", "'\\''")
+        script_lines = [
+            "set -e",
+            f"mkdir -p '{frames_dir}'",
+            # Find target window id (first match)
+            f"win_id=\"$(xdotool search --any '{pattern}' | head -n1)\"",
+            "test -n \"$win_id\" || { echo 'window not found' >&2; exit 1; }",
+            # Focus window
+            "xdotool windowactivate $win_id && xdotool windowfocus $win_id",
+            # Start background frame capture loop
+            "( \n"
+            "  idx=0; \n"
+            "  start=$(date +%s%3N); \n"
+            f"  end=$((start + {duration}*1000)); \n"
+            "  while [ $(date +%s%3N) -lt $end ]; do \n"
+            f"    xfce4-screenshooter -f -s '{frames_dir}/frame_$(printf %06d $idx).png' >/dev/null 2>&1; \n"
+            f"    idx=$((idx+1)); sleep {max(1, interval)//1000}.{(interval%1000):03d}; \n"
+            "  done \n"
+            ") & cap_pid=$!",
+        ]
+
+        # Append input sending as discrete key events with optional delays
+        for item in inputs:
+            keys = item.get("keys")
+            delay_ms = int(item.get("delay_ms", 100)) if isinstance(item, dict) else 100
+            if not keys:
+                continue
+            esc_keys = str(keys)
+            script_lines.append(
+                f"xdotool key --clearmodifiers --delay {delay_ms} --repeat 0 --repeat-delay 0 --window $win_id {esc_keys} || true"
+            )
+
+        # Wait for capture loop to finish, then compile frames into a webm using ffmpeg (libvpx-vp9)
+        script_lines.extend([
+            "wait $cap_pid || true",
+            f"ffmpeg -y -framerate $((1000/{max(1, interval)})) -pattern_type glob -i '{frames_dir}/frame_*.png' -c:v libvpx-vp9 -pix_fmt yuv420p '{video_out}' >/dev/null 2>&1 || true",
+            "echo OUTPUT_VIDEO:\n" + video_out,
+        ])
+
+        full_script = "\n".join(script_lines)
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(full_script, task_id)
+
+        # Provide JSON-like response including output paths and, if available, URL to video
+        payload = {"exit_code": exit_code, "frames_dir": frames_dir, "video": video_out}
+        if _public_host and _public_port:
+            from urllib.parse import quote as _q
+            from .web import build_screenshot_url as _b
+            # Reuse screenshots route to serve the video file
+            fname = f"{base}.webm"
+            payload["video_url"] = _b(_public_host, int(_public_port), fname)
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "potato_workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
