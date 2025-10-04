@@ -30,13 +30,6 @@ ENV PATH="/usr/lib/go-1.23/bin:${PATH}"
 # Add Rust to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Copy environment file if it exists (will be handled by build context)
-# Note: This file must exist in build context - create empty one if needed
-COPY environment.sh /tmp/environment.sh
-RUN if [ -s /tmp/environment.sh ]; then \
-        cat /tmp/environment.sh >> /root/.profile; \
-    fi
-
 # Set working directory
 WORKDIR /workspace
 

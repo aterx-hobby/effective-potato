@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 import pytest
-from effective_potato.container import ContainerManager
+from effective_potato.container import ContainerManager, validate_and_load_env_file
 
 
 @pytest.fixture
@@ -22,6 +22,70 @@ def temp_env_files():
         sample_env = Path(tmpdir) / "sample.env"
         sample_env.write_text("# Sample environment file\n")
         yield env_file, sample_env
+
+
+def test_validate_and_load_env_file_valid():
+    """Test loading a valid .env file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text(
+            "VAR1=value1\n"
+            "VAR2=value2\n"
+            "VAR_WITH_QUOTES=\"quoted value\"\n"
+            "VAR_WITH_SINGLE_QUOTES='single quoted'\n"
+            "# This is a comment\n"
+            "\n"
+            "VAR3=value3\n"
+            "export VAR4=value4\n"
+        )
+        
+        env_vars = validate_and_load_env_file(env_file)
+        
+        assert len(env_vars) == 6
+        assert env_vars["VAR1"] == "value1"
+        assert env_vars["VAR2"] == "value2"
+        assert env_vars["VAR_WITH_QUOTES"] == "quoted value"
+        assert env_vars["VAR_WITH_SINGLE_QUOTES"] == "single quoted"
+        assert env_vars["VAR3"] == "value3"
+        assert env_vars["VAR4"] == "value4"
+
+
+def test_validate_and_load_env_file_empty():
+    """Test loading an empty .env file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text("")
+        
+        env_vars = validate_and_load_env_file(env_file)
+        
+        assert len(env_vars) == 0
+
+
+def test_validate_and_load_env_file_nonexistent():
+    """Test loading a non-existent .env file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_file = Path(tmpdir) / ".env"
+        
+        env_vars = validate_and_load_env_file(env_file)
+        
+        assert len(env_vars) == 0
+
+
+def test_validate_and_load_env_file_invalid():
+    """Test that invalid content raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text(
+            "VAR1=value1\n"
+            "This is not a valid line\n"
+            "VAR2=value2\n"
+        )
+        
+        with pytest.raises(ValueError) as exc_info:
+            validate_and_load_env_file(env_file)
+        
+        assert "Invalid content" in str(exc_info.value)
+        assert "line 2" in str(exc_info.value)
 
 
 def test_container_manager_initialization(temp_workspace, temp_env_files):
@@ -155,5 +219,87 @@ def test_script_cleanup_after_execution(temp_workspace, temp_env_files):
     
     # Verify script is removed
     assert not script_path.exists()
+
+
+def test_container_manager_loads_env_vars():
+    """Test that ContainerManager loads environment variables from .env file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text("TEST_VAR1=value1\nTEST_VAR2=value2\n")
+        
+        sample_env = Path(tmpdir) / "sample.env"
+        sample_env.write_text("# Sample\n")
+        
+        manager = ContainerManager(
+            workspace_dir=str(workspace),
+            env_file=str(env_file),
+            sample_env_file=str(sample_env),
+        )
+        
+        assert len(manager.env_vars) == 2
+        assert manager.env_vars["TEST_VAR1"] == "value1"
+        assert manager.env_vars["TEST_VAR2"] == "value2"
+
+
+def test_container_manager_invalid_env_file_raises_error():
+    """Test that invalid .env file raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text("VAR1=value1\nINVALID CONTENT\n")
+        
+        sample_env = Path(tmpdir) / "sample.env"
+        sample_env.write_text("# Sample\n")
+        
+        with pytest.raises(ValueError):
+            ContainerManager(
+                workspace_dir=str(workspace),
+                env_file=str(env_file),
+                sample_env_file=str(sample_env),
+            )
+
+
+def test_execute_command_includes_env_vars(temp_workspace, temp_env_files):
+    """Test that execute_command includes environment variables in script."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text("TEST_VAR=test_value\n")
+        
+        sample_env = Path(tmpdir) / "sample.env"
+        sample_env.write_text("# Sample\n")
+        
+        manager = ContainerManager(
+            workspace_dir=str(workspace),
+            env_file=str(env_file),
+            sample_env_file=str(sample_env),
+        )
+        
+        # Manually create a script to verify the content
+        task_id = "test_env"
+        script_dir = workspace / ".tmp_agent_scripts"
+        script_path = script_dir / f"task_{task_id}.sh"
+        
+        # Build script content with environment variables prefixed
+        script_content = "#!/bin/bash\n\n"
+        for var_name, var_value in manager.env_vars.items():
+            escaped_value = var_value.replace("'", "'\\''")
+            script_content += f"export {var_name}='{escaped_value}'\n"
+        if manager.env_vars:
+            script_content += "\n"
+        script_content += "echo 'test command'\n"
+        
+        script_path.write_text(script_content)
+        
+        content = script_path.read_text()
+        assert "export TEST_VAR='test_value'" in content
+        assert "echo 'test command'" in content
 
 
