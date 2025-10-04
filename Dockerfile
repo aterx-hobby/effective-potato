@@ -33,5 +33,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Set working directory
 WORKDIR /workspace
 
+USER "ubuntu"
+
 # Run sleep infinity to keep container alive
 CMD ["sleep", "infinity"]
