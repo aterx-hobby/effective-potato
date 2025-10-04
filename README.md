@@ -176,7 +176,8 @@ effective-potato/
 ├── local/
 │   ├── sample.env            # Example environment file
 │   └── .env                  # Your custom environment (gitignored)
-├── Dockerfile                # Container definition
+├── Dockerfile.base           # Base image (system packages)
+├── Dockerfile                # Runner image (FROM base)
 └── setup.py                  # Package configuration
 ```
 
