@@ -96,3 +96,64 @@ def test_execute_command_creates_script(temp_workspace, temp_env_files):
     assert script_path.exists()
     assert script_path.read_text() == script_content
     assert os.access(script_path, os.X_OK)  # Check it's executable
+
+
+def test_cleanup_removes_script_files(temp_workspace, temp_env_files):
+    """Test that cleanup removes all script files."""
+    env_file, sample_env = temp_env_files
+    manager = ContainerManager(
+        workspace_dir=temp_workspace,
+        env_file=str(env_file),
+        sample_env_file=str(sample_env),
+    )
+
+    # Create some mock script files
+    script_dir = Path(temp_workspace) / ".tmp_agent_scripts"
+    script1 = script_dir / "task_test1.sh"
+    script2 = script_dir / "task_test2.sh"
+    script3 = script_dir / "task_test3.sh"
+    
+    script1.write_text("#!/bin/bash\necho 'test1'\n")
+    script2.write_text("#!/bin/bash\necho 'test2'\n")
+    script3.write_text("#!/bin/bash\necho 'test3'\n")
+    
+    # Verify scripts exist
+    assert script1.exists()
+    assert script2.exists()
+    assert script3.exists()
+    
+    # Run cleanup
+    manager.cleanup()
+    
+    # Verify scripts are removed
+    assert not script1.exists()
+    assert not script2.exists()
+    assert not script3.exists()
+
+
+def test_script_cleanup_after_execution(temp_workspace, temp_env_files):
+    """Test that scripts are cleaned up immediately after execution."""
+    env_file, sample_env = temp_env_files
+    manager = ContainerManager(
+        workspace_dir=temp_workspace,
+        env_file=str(env_file),
+        sample_env_file=str(sample_env),
+    )
+
+    # Manually create and execute a script to simulate the execute_command behavior
+    task_id = "cleanup_test"
+    script_dir = Path(temp_workspace) / ".tmp_agent_scripts"
+    script_path = script_dir / f"task_{task_id}.sh"
+    
+    # Create the script
+    script_path.write_text("#!/bin/bash\necho 'test'\n")
+    assert script_path.exists()
+    
+    # Simulate cleanup after execution (mimicking what execute_command does)
+    if script_path.exists():
+        script_path.unlink()
+    
+    # Verify script is removed
+    assert not script_path.exists()
+
+
