@@ -24,7 +24,9 @@ async def test_workspace_find_command_and_prune():
         res = await server.call_tool("workspace_find", {"path": "projects/demo"})
         assert isinstance(res, list) and res
         txt = res[0].text
-        assert "Exit code: 0" in txt
+        import json as _json
+        payload = _json.loads(txt)
+        assert payload.get("exit_code") == 0
 
         cmd = fake.last_command
         assert cmd is not None
