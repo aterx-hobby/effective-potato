@@ -132,4 +132,13 @@ cp local/sample.env local/.env
 - Never commit `local/.env` (it's gitignored)
 - The container is rebuilt on each startup
 - Use the script-based execution pattern for reliability
-- Maintain test coverage when adding features 
+- Maintain test coverage when adding features
+
+## Development Mode Policy
+- This repository is currently in active development. We do not preserve legacy tool names or APIs during this phase.
+- Breaking changes are allowed and expected when they simplify the surface area or align with new conventions.
+- Prefer the workspace-prefixed naming for tools. For example:
+      - Multi-tool pipeline: DEPRECATED. Do not expose or use `potato_workspace_multi_tool_pipeline` (previously `potato_multi_tool_pipeline`). Invoke individual tools instead.
+   - Local workspace operations should start with `potato_workspace_*`.
+   - Remote GitHub operations should start with `github_*`.
+   - Do not add backward-compatibility aliases during development; update callers/tests instead.

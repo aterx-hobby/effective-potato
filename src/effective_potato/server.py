@@ -70,24 +70,7 @@ async def list_tools() -> list[Tool]:
                 "required": ["launch_command"],
             },
         ),
-        Tool(
-            name="potato_multi_tool_pipeline",
-            description="Run a staged pipeline of actions (write_file/mkdir/exec/read_file and other tools) as a single call",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "steps": {
-                        "type": "array",
-                        "description": "Ordered list of step objects with a 'type' field",
-                        "items": {"type": "object"}
-                    },
-                    "working_dir": {"type": "string", "description": "Optional workspace-relative working directory for exec steps"},
-                    "stop_on_error": {"type": "boolean", "default": True},
-                    "extra_env": {"type": "object", "description": "Optional environment variables for the pipeline run"}
-                },
-                "required": ["steps"],
-            },
-        ),
+        # Note: The former multi-tool pipeline is deprecated and intentionally not exposed.
         Tool(
             name="potato_workspace_list_repositories",
             description="List repositories tracked in the locally deployed effective-potato workspace (.agent/track_repos.json) and whether their directories currently exist",
@@ -172,7 +155,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         return [TextContent(type="text", text=response)]
     
-    elif name in ("github_list_repositories", "list_repositories"):
+    elif name == "github_list_repositories":
         if not container_manager.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
         
@@ -243,124 +226,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         response = f"Exit code: {exit_code}\n{saved_line}\n\nOutput:\n{output}"
         return [TextContent(type="text", text=response)]
     
-    elif name == "potato_multi_tool_pipeline":
-        steps = arguments.get("steps")
-        if not isinstance(steps, list) or not steps:
-            raise ValueError("'steps' must be a non-empty array")
-        working_dir = arguments.get("working_dir")
-        stop_on_error = bool(arguments.get("stop_on_error", True))
-        extra_env = arguments.get("extra_env")
-        import json
-        # We support both low-level file/exec steps and invoking existing tools by name.
-        low_level_types = {"write_file", "mkdir", "exec", "run", "command", "read_file"}
-
-        def flush_low_level(buf: list[dict], acc_results: list[dict]):
-            if not buf:
-                return
-            res = container_manager.run_pipeline(
-                steps=buf,
-                working_dir=working_dir,
-                stop_on_error=stop_on_error,
-                extra_env=extra_env,
-            )
-            # pass through per-step results
-            acc_results.extend(res.get("results", []))
-
-        results: list[dict] = []
-        buf: list[dict] = []
-
-        for idx, step in enumerate(steps):
-            stype = (step.get("type") or "").lower()
-            # Low-level steps are accumulated and run in a single container exec
-            if stype in low_level_types:
-                buf.append(step)
-                continue
-
-            # Flush any pending low-level steps before handling a tool step
-            flush_low_level(buf, results)
-            buf = []
-
-            # Dispatch to known tools
-            if stype == "execute_command":
-                command = step.get("command")
-                if not command:
-                    raise ValueError("execute_command step requires 'command'")
-                task_id = str(uuid.uuid4())
-                exit_code, output = container_manager.execute_command(command, task_id)
-                results.append({"index": idx, "type": stype, "exit_code": exit_code, "output": output})
-            elif stype in ("github_list_repositories", "list_repositories"):
-                if not container_manager.is_github_available():
-                    results.append({"index": idx, "type": stype, "error": "GitHub CLI is not available"})
-                else:
-                    owner = step.get("owner")
-                    limit = step.get("limit", 30)
-                    exit_code, output = container_manager.list_repositories(owner=owner, limit=limit)
-                    results.append({"index": idx, "type": stype, "exit_code": exit_code, "output": output})
-            elif stype == "clone_repository":
-                if not container_manager.is_github_available():
-                    results.append({"index": idx, "type": stype, "error": "GitHub CLI is not available"})
-                else:
-                    owner = step.get("owner")
-                    repo = step.get("repo")
-                    if not owner or not repo:
-                        raise ValueError("clone_repository requires 'owner' and 'repo'")
-                    exit_code, output = container_manager.clone_repository(owner=owner, repo=repo)
-                    results.append({"index": idx, "type": stype, "exit_code": exit_code, "output": output})
-            elif stype == "launch_and_screenshot":
-                launch_command = step.get("launch_command")
-                delay = int(step.get("delay_seconds", 2))
-                filename = step.get("filename")
-                if not launch_command:
-                    raise ValueError("launch_and_screenshot requires 'launch_command'")
-                shot_dir = "/workspace/.agent/screenshots"
-                import datetime as dt
-                ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-                out_name = filename or f"screenshot_{ts}.png"
-                out_path = f"{shot_dir}/{out_name}"
-                cmd = (
-                    "mkdir -p /workspace/.agent/screenshots && "
-                    f"({launch_command}) >/tmp/launch.log 2>&1 & "
-                    f"sleep {delay}; "
-                    "export DISPLAY=:0; "
-                    "xdotool key XF86Refresh >/dev/null 2>&1 || true; "
-                    f"xfce4-screenshooter -f -s '{out_path}'"
-                )
-                task_id = str(uuid.uuid4())
-                exit_code, output = container_manager.execute_command(cmd, task_id)
-                url = None
-                if _public_host and _public_port:
-                    url = build_screenshot_url(_public_host, int(_public_port), out_name)
-                result_obj = {"index": idx, "type": stype, "exit_code": exit_code, "saved": out_path}
-                if url:
-                    result_obj["url"] = url
-                results.append(result_obj)
-            elif stype == "potato_multi_tool_pipeline":
-                # Nested pipeline: process recursively by making a sub-call
-                sub_steps = step.get("steps")
-                if not isinstance(sub_steps, list) or not sub_steps:
-                    raise ValueError("nested potato_multi_tool_pipeline requires non-empty 'steps'")
-                sub_args = {
-                    "steps": sub_steps,
-                    "working_dir": step.get("working_dir"),
-                    "stop_on_error": step.get("stop_on_error", True),
-                    "extra_env": step.get("extra_env"),
-                }
-                # Reuse the same dispatcher recursively
-                sub_result = await call_tool("potato_multi_tool_pipeline", sub_args)  # type: ignore
-                # sub_result is a [TextContent], extract JSON text
-                try:
-                    payload = json.loads(sub_result[0].text)
-                except Exception:
-                    payload = {"error": "failed to parse nested pipeline result"}
-                results.append({"index": idx, "type": stype, "result": payload})
-            else:
-                raise ValueError(f"Unsupported pipeline step type: {stype}")
-
-        # Flush any trailing low-level steps
-        flush_low_level(buf, results)
-
-        return [TextContent(type="text", text=json.dumps({"results": results}, ensure_ascii=False, indent=2))]
-    elif name in ("potato_workspace_list_repositories", "list_local_repositories"):
+    elif name == "potato_workspace_multi_tool_pipeline":
+        # Deprecated: no longer exposed. Provide a clear deprecation message.
+        msg = (
+            "The multi-tool pipeline (potato_workspace_multi_tool_pipeline) is deprecated and no longer exposed. "
+            "Invoke individual tools directly in sequence instead."
+        )
+        return [TextContent(type="text", text=msg)]
+    elif name == "potato_workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
         return [TextContent(type="text", text=json.dumps({"items": items}, ensure_ascii=False, indent=2))]
