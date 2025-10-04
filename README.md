@@ -172,7 +172,7 @@ effective-potato/
 │       └── container.py       # Docker container management
 ├── tests/                     # Test suite
 ├── workspace/                 # Mounted directory for container
-│   └── .tmp_agent_scripts/   # Temporary execution scripts
+│   └── .agent/tmp_scripts/   # Temporary execution scripts
 ├── local/
 │   ├── sample.env            # Example environment file
 │   └── .env                  # Your custom environment (gitignored)
@@ -187,7 +187,7 @@ effective-potato/
 
 Instead of passing commands directly via `docker exec` with arguments, effective-potato:
 
-1. Creates a bash script in `workspace/.tmp_agent_scripts/task_$taskid$.sh`
+1. Creates a bash script in `workspace/.agent/tmp_scripts/task_$taskid$.sh`
 2. Writes the command to the script
 3. Makes it executable
 4. Executes the script in the container via `docker exec`
@@ -206,7 +206,7 @@ ls -ltrah /
 
 And executes it as:
 ```bash
-docker exec $containerid$ /workspace/.tmp_agent_scripts/task_$taskid$.sh
+docker exec $containerid$ /workspace/.agent/tmp_scripts/task_$taskid$.sh
 ```
 
 ## Environment Configuration

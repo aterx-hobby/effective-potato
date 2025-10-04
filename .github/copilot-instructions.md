@@ -42,7 +42,7 @@ effective-potato is an MCP (Model Context Protocol) server that provides callabl
 
 ### Key Directories
 - `workspace/`: Mounted directory for container file exchange
-- `workspace/.tmp_agent_scripts/`: Temporary scripts for command execution
+- `workspace/.agent/tmp_scripts/`: Temporary scripts for command execution
 - `local/`: Local configuration files (gitignored)
 - `local/sample.env`: Example environment configuration
 
@@ -73,10 +73,10 @@ effective-potato is an MCP (Model Context Protocol) server that provides callabl
 
 ### Script-Based Execution
 Instead of direct `docker exec` with arguments, commands should be:
-1. Written to a bash script in `workspace/.tmp_agent_scripts/`
+1. Written to a bash script in `workspace/.agent/tmp_scripts/`
 2. Named as `task_$taskid$.sh`
 3. Marked as executable
-4. Executed via `docker exec $containerid$ -- /path/to/workspace/.tmp_agent_scripts/task_$taskid$.sh`
+4. Executed via `docker exec $containerid$ -- /path/to/workspace/.agent/tmp_scripts/task_$taskid$.sh`
 
 ### Example
 For command `ls -ltrah /`:

@@ -74,7 +74,7 @@ Successfully built the effective-potato MCP server from scratch according to the
 ## Key Features Implemented
 
 ### Script-Based Execution
-Commands are executed via bash scripts written to `workspace/.tmp_agent_scripts/task_$taskid$.sh`:
+Commands are executed via bash scripts written to `workspace/.agent/tmp_scripts/task_$taskid$.sh`:
 - Avoids argument escaping issues
 - Provides reliable execution
 - Each command gets unique task ID
@@ -92,7 +92,7 @@ Commands are executed via bash scripts written to `workspace/.tmp_agent_scripts/
 ### Workspace Persistence
 - `workspace/` directory mounted read/write to container
 - Allows file exchange between host and container
-- `.tmp_agent_scripts/` subdirectory for execution scripts
+- `.agent/tmp_scripts/` subdirectory for execution scripts
 
 ## Verification
 
@@ -140,7 +140,7 @@ effective-potato/
 ├── local/
 │   └── sample.env            # Environment template
 └── workspace/                # Container mount point
-    └── .tmp_agent_scripts/   # Execution scripts
+  └── .agent/tmp_scripts/   # Execution scripts
 ```
 
 ## Usage

@@ -8,6 +8,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+import tarfile
+import io
 
 import docker
 from docker.models.containers import Container
@@ -94,7 +96,9 @@ class ContainerManager:
 
         # Ensure workspace directories exist
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        (self.workspace_dir / ".tmp_agent_scripts").mkdir(parents=True, exist_ok=True)
+        agent_dir = self.workspace_dir / ".agent"
+        (agent_dir / "tmp_scripts").mkdir(parents=True, exist_ok=True)
+        (agent_dir / "screenshots").mkdir(parents=True, exist_ok=True)
         
         # Load and validate environment variables from .env file
         self.env_vars: dict[str, str] = {}
@@ -106,13 +110,28 @@ class ContainerManager:
                 logger.error(f"Failed to load environment file: {e}")
                 raise
         else:
-            logger.warning(
+            logger.info(
                 f"Environment file not found: {self.env_file}. "
-                f"No custom environment variables will be set."
+                f"Proceeding without local overrides; process environment will be used if present."
             )
-            logger.warning(
-                f"See {self.sample_env_file} for how to format a local/.env file"
+            logger.info(
+                f"See {self.sample_env_file} for how to format a local/.env file (optional)"
             )
+
+    def _env_get(self, *keys: str) -> Optional[str]:
+        """Return the first non-empty value from loaded env file or process env.
+
+        Checks self.env_vars (local/.env) first, then os.environ.
+        """
+        for k in keys:
+            v = self.env_vars.get(k)
+            if v:
+                return v
+        for k in keys:
+            v = os.environ.get(k)
+            if v:
+                return v
+        return None
 
     def build_image(self) -> None:
         """Build the Docker image with Ubuntu 24.04 and required packages."""
@@ -327,25 +346,8 @@ class ContainerManager:
 
         # Mount workspace directory (rw)
         volumes: dict[str, dict[str, str]] = {
-            str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
+            str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"},
         }
-
-        # Optionally mount a host SSH private key read-only
-        # Env variables (host side, loaded earlier):
-        #   EFFECTIVE_POTATO_SSH_KEY_PATH: absolute path to private key file
-        ssh_key_path = self.env_vars.get("EFFECTIVE_POTATO_SSH_KEY_PATH") or self.env_vars.get("SSH_PRIVATE_KEY_PATH")
-        ssh_host_path: Optional[Path] = None
-        if ssh_key_path:
-            try:
-                p = Path(ssh_key_path).expanduser().absolute()
-                if p.exists() and p.is_file():
-                    ssh_host_path = p
-                    # Bind mount into container at a known read-only path
-                    volumes[str(p)] = {"bind": "/ssh-ro/id_rsa", "mode": "ro"}
-                else:
-                    logger.warning(f"SSH key path does not exist or is not a file: {p}")
-            except Exception as e:
-                logger.warning(f"Invalid SSH key path '{ssh_key_path}': {e}")
 
         self.container = self.client.containers.run(
             self.image_name,
@@ -366,8 +368,8 @@ class ContainerManager:
         except Exception as e:
             logger.warning(f"Failed to set up git/ssh: {e}")
 
-        # Authenticate GitHub CLI if token is available
-        if "GITHUB_PERSONAL_ACCESS_TOKEN" in self.env_vars:
+        # Authenticate GitHub CLI if token is available (from local/.env or process env)
+        if self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN"):
             self._authenticate_github()
         
         return self.container
@@ -383,37 +385,78 @@ class ContainerManager:
         if not self.container:
             return
 
-        git_name = (
-            self.env_vars.get("GIT_USER_NAME")
-            or self.env_vars.get("EFFECTIVE_POTATO_GIT_NAME")
-            or "effective-potato"
-        )
-        git_email = (
-            self.env_vars.get("GIT_USER_EMAIL")
-            or self.env_vars.get("EFFECTIVE_POTATO_GIT_EMAIL")
-            or "effective-potato@aterx.com"
-        )
+        git_name = self._env_get("GIT_USER_NAME", "EFFECTIVE_POTATO_GIT_NAME") or "effective-potato"
+        git_email = self._env_get("GIT_USER_EMAIL", "EFFECTIVE_POTATO_GIT_EMAIL") or "effective-potato@aterx.com"
+
+        # Ensure .ssh exists with correct perms
+        self.container.exec_run(cmd=["bash", "-lc", "mkdir -p /home/ubuntu/.ssh"], user="ubuntu", demux=True)
 
         # Set git config as ubuntu
         cfg_cmd = (
-            f"git config --global user.name '{git_name.replace("'", "'\\''")}' && "
-            f"git config --global user.email '{git_email.replace("'", "'\\''")}'"
+            f"git config --global user.name '{git_name.replace('\'', '\'\\\'\'')}' && "
+            f"git config --global user.email '{git_email.replace('\'', '\'\\\'\'')}'"
         )
         self.container.exec_run(cmd=["bash", "-lc", cfg_cmd], user="ubuntu", demux=True)
 
-        # Install SSH key if present via mounted ro path
-        # Key expected at /ssh-ro/id_rsa (mounted if provided)
-        install_key_script = (
+        # Copy SSH key into container if provided; set perms 0400 and owner ubuntu
+        ssh_key_path = self._env_get("EFFECTIVE_POTATO_SSH_KEY_PATH", "SSH_PRIVATE_KEY_PATH")
+        if ssh_key_path:
+            try:
+                p = Path(ssh_key_path).expanduser().absolute()
+                if not (p.exists() and p.is_file()):
+                    logger.warning(f"SSH key path does not exist or is not a file: {p}")
+                else:
+                    logger.info(f"Installing SSH key for ubuntu from: {p}")
+                    # Create a tar stream containing id_rsa
+                    data = p.read_bytes()
+                    tar_stream = io.BytesIO()
+                    with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+                        info = tarfile.TarInfo(name="id_rsa")
+                        info.size = len(data)
+                        info.mode = 0o400  # set 0400 as requested
+                        tar.addfile(info, io.BytesIO(data))
+                    tar_stream.seek(0)
+
+                    # Put archive into /home/ubuntu/.ssh
+                    self.container.put_archive("/home/ubuntu/.ssh", tar_stream.getvalue())
+
+                    # Fix ownership and permissions explicitly
+                    fix_cmd = (
+                        "chown -R ubuntu:ubuntu /home/ubuntu/.ssh && "
+                        "chmod 700 /home/ubuntu/.ssh && chmod 400 /home/ubuntu/.ssh/id_rsa"
+                    )
+                    self.container.exec_run(cmd=["bash", "-lc", fix_cmd], user="root", demux=True)
+            except Exception as e:
+                logger.warning(f"Failed to install SSH key: {e}")
+        else:
+            logger.info("No SSH key path provided (EFFECTIVE_POTATO_SSH_KEY_PATH/SSH_PRIVATE_KEY_PATH)")
+
+        # Always write SSH config for GitHub to use the private key if present
+        ssh_config_script = (
             "set -e; "
-            "if [ -f /ssh-ro/id_rsa ]; then "
-            "  mkdir -p /home/ubuntu/.ssh; "
-            "  cp /ssh-ro/id_rsa /home/ubuntu/.ssh/id_rsa; "
-            "  chown -R ubuntu:ubuntu /home/ubuntu/.ssh; "
-            "  chmod 700 /home/ubuntu/.ssh; chmod 600 /home/ubuntu/.ssh/id_rsa; "
-            "fi"
+            "umask 077; "
+            "mkdir -p /home/ubuntu/.ssh; "
+            "cat > /home/ubuntu/.ssh/config <<'EOF'\n"
+            "Host github.com\n"
+            "        HostName github.com\n"
+            "        User git\n"
+            "        IdentityFile ~/.ssh/id_rsa\n"
+            "        StrictHostKeyChecking accept-new\n\n"
+            "EOF\n"
+            "chown -R ubuntu:ubuntu /home/ubuntu/.ssh; "
+            "chmod 700 /home/ubuntu/.ssh; chmod 600 /home/ubuntu/.ssh/config"
         )
-        # Run as root to ensure ownership/permissions adjustments succeed
-        self.container.exec_run(cmd=["bash", "-lc", install_key_script], user="root", demux=True)
+        self.container.exec_run(cmd=["bash", "-lc", ssh_config_script], user="root", demux=True)
+
+        # Ensure GitHub CLI clones via SSH by default for ubuntu
+        try:
+            self.container.exec_run(
+                cmd=["bash", "-lc", "gh config set git_protocol ssh -h github.com || true"],
+                user="ubuntu",
+                demux=True,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set gh git_protocol to ssh: {e}")
 
     def stop_container(self) -> None:
         """Stop and remove the container if it's running."""
@@ -433,7 +476,7 @@ class ContainerManager:
         if not self.container:
             raise RuntimeError("Container is not running")
         
-        token = self.env_vars.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+        token = self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN") or ""
         if not token:
             return
         
@@ -448,6 +491,7 @@ class ContainerManager:
         exec_result = self.container.exec_run(
             cmd=["bash", "-c", auth_cmd],
             demux=True,
+            user="ubuntu",
         )
         
         if exec_result.exit_code == 0:
@@ -467,7 +511,7 @@ class ContainerManager:
         Returns:
             True if GitHub CLI is authenticated, False otherwise
         """
-        return "GITHUB_PERSONAL_ACCESS_TOKEN" in self.env_vars
+        return bool(self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN"))
 
     def execute_command(self, command: str, task_id: str) -> tuple[int, str]:
         """Execute a command in the container via a script file.
@@ -483,19 +527,37 @@ class ContainerManager:
             raise RuntimeError("Container is not running")
 
         # Create script file in workspace
-        script_dir = self.workspace_dir / ".tmp_agent_scripts"
+        script_dir = self.workspace_dir / ".agent" / "tmp_scripts"
         script_path = script_dir / f"task_{task_id}.sh"
 
         # Build script content with environment variables prefixed
         script_content = "#!/bin/bash\n\n"
         
-        # Add environment variable exports at the beginning
+        # Add environment variable exports at the beginning (from local/.env)
         for var_name, var_value in self.env_vars.items():
             # Escape single quotes in the value
             escaped_value = var_value.replace("'", "'\\''")
             script_content += f"export {var_name}='{escaped_value}'\n"
         
-        if self.env_vars:
+        # Ensure GitHub tokens are exported for downstream commands.
+        # Prefer a single source of truth token and map it to common env names.
+        token_from_any = (
+            self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN")
+            or self._env_get("GH_TOKEN")
+            or self._env_get("GITHUB_TOKEN")
+        )
+        if token_from_any:
+            escaped_token = token_from_any.replace("'", "'\\''")
+            # Export canonical PAT if not already provided in local .env
+            if "GITHUB_PERSONAL_ACCESS_TOKEN" not in self.env_vars:
+                script_content += f"export GITHUB_PERSONAL_ACCESS_TOKEN='{escaped_token}'\n"
+            # Also populate the commonly used aliases if not already provided
+            if "GH_TOKEN" not in self.env_vars:
+                script_content += f"export GH_TOKEN='{escaped_token}'\n"
+            if "GITHUB_TOKEN" not in self.env_vars:
+                script_content += f"export GITHUB_TOKEN='{escaped_token}'\n"
+
+        if self.env_vars or token_from_any:
             script_content += "\n"
         
         # Ensure DISPLAY is set for X apps
@@ -510,7 +572,7 @@ class ContainerManager:
         script_path.chmod(0o755)
 
         # Execute the script in the container
-        container_script_path = f"/workspace/.tmp_agent_scripts/task_{task_id}.sh"
+        container_script_path = f"/workspace/.agent/tmp_scripts/task_{task_id}.sh"
         exec_result = self.container.exec_run(
             cmd=["bash", "-lc", container_script_path],
             demux=True,
@@ -548,7 +610,7 @@ class ContainerManager:
             Tuple of (exit_code, output)
         """
         if not self.is_github_available():
-            return 1, "GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env"
+            return 1, "GitHub CLI is not available. Provide GITHUB_PERSONAL_ACCESS_TOKEN via environment or local/.env"
         
         if not self.container:
             raise RuntimeError("Container is not running")
@@ -576,7 +638,7 @@ class ContainerManager:
             Tuple of (exit_code, output)
         """
         if not self.is_github_available():
-            return 1, "GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env"
+            return 1, "GitHub CLI is not available. Provide GITHUB_PERSONAL_ACCESS_TOKEN via environment or local/.env"
         
         if not self.container:
             raise RuntimeError("Container is not running")
@@ -595,7 +657,7 @@ class ContainerManager:
         self.stop_container()
         
         # Clean up any remaining script files
-        script_dir = self.workspace_dir / ".tmp_agent_scripts"
+        script_dir = self.workspace_dir / ".agent" / "tmp_scripts"
         if script_dir.exists():
             for script_file in script_dir.glob("task_*.sh"):
                 try:
@@ -605,3 +667,336 @@ class ContainerManager:
                     logger.warning(f"Failed to clean up script {script_file}: {e}")
         
         logger.info("Cleanup complete")
+
+    # ---------------------------
+    # Workspace file I/O helpers
+    # ---------------------------
+    def _resolve_workspace_path(self, relative_path: str) -> Path:
+        """Resolve a path within the workspace and prevent traversal outside it.
+
+        Args:
+            relative_path: Path relative to the workspace root.
+
+        Returns:
+            Absolute Path inside the workspace.
+
+        Raises:
+            ValueError: If the path is absolute or resolves outside the workspace.
+        """
+        if not relative_path:
+            raise ValueError("relative_path must be a non-empty string")
+
+        rel = Path(relative_path)
+        if rel.is_absolute():
+            raise ValueError("Absolute paths are not allowed; provide a path relative to the workspace root")
+
+        # Resolve against the workspace and ensure containment (handles .. and symlinks)
+        root = self.workspace_dir.resolve()
+        resolved = (root / rel).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("Path resolves outside the workspace; operation blocked")
+        return resolved
+
+    def write_workspace_file(
+        self,
+        relative_path: str,
+        data,
+        *,
+        binary: bool | None = None,
+        encoding: str = "utf-8",
+        makedirs: bool = True,
+        executable: bool = False,
+        append: bool = False,
+    ) -> Path:
+        """Write a file under the mounted workspace safely.
+
+        Args:
+            relative_path: Path relative to the workspace root.
+            data: Text (str) or bytes to write.
+            binary: Force binary/text mode. If None, inferred from type of data.
+            encoding: Text encoding when writing str data.
+            makedirs: Create parent directories if missing.
+            executable: Mark file as executable (adds 0o111 to mode) when True.
+            append: Open the file for appending instead of overwriting.
+
+        Returns:
+            The absolute Path to the written file.
+        """
+        path = self._resolve_workspace_path(relative_path)
+
+        if makedirs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+        if binary is None:
+            binary = not isinstance(data, str)
+
+        mode = ("ab" if append else "wb") if binary else ("a" if append else "w")
+        if binary:
+            if not isinstance(data, (bytes, bytearray)):
+                raise TypeError("Binary mode requires data to be bytes or bytearray")
+            with open(path, mode) as f:
+                f.write(data)
+        else:
+            if not isinstance(data, str):
+                raise TypeError("Text mode requires data to be a str; set binary=True for bytes")
+            with open(path, mode, encoding=encoding, newline="") as f:
+                f.write(data)
+
+        if executable:
+            try:
+                current = path.stat().st_mode
+                path.chmod(current | 0o111)
+            except Exception as e:
+                logger.warning(f"Failed to mark file executable: {path}: {e}")
+
+        return path
+
+    def read_workspace_file(
+        self,
+        relative_path: str,
+        *,
+        binary: bool = False,
+        encoding: str = "utf-8",
+    ):
+        """Read a file from the workspace safely.
+
+        Args:
+            relative_path: Path relative to the workspace root.
+            binary: When True, return bytes; else return str decoded with encoding.
+            encoding: Text encoding to use when binary is False.
+
+        Returns:
+            File contents as str or bytes.
+        """
+        path = self._resolve_workspace_path(relative_path)
+        if binary:
+            with open(path, "rb") as f:
+                return f.read()
+        with open(path, "r", encoding=encoding) as f:
+            return f.read()
+
+    # ---------------------------
+    # JSON / YAML helpers
+    # ---------------------------
+    def write_workspace_json(self, relative_path: str, data, *, indent: int = 2, ensure_ascii: bool = False) -> Path:
+        """Serialize data as JSON to a file in the workspace."""
+        import json
+        text = json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
+        return self.write_workspace_file(relative_path, text)
+
+    def read_workspace_json(self, relative_path: str):
+        """Read JSON from a file in the workspace and return parsed data."""
+        import json
+        text = self.read_workspace_file(relative_path)
+        return json.loads(text)
+
+    def write_workspace_yaml(self, relative_path: str, data) -> Path:
+        """Serialize data as YAML to a file in the workspace."""
+        import yaml  # type: ignore
+        text = yaml.safe_dump(data, sort_keys=False)
+        return self.write_workspace_file(relative_path, text)
+
+    def read_workspace_yaml(self, relative_path: str):
+        """Read YAML from a file in the workspace and return parsed data."""
+        import yaml  # type: ignore
+        text = self.read_workspace_file(relative_path)
+        return yaml.safe_load(text)
+    # ---------------------------
+    # Pipelines
+    # ---------------------------
+    def run_pipeline(
+        self,
+        steps: list[dict],
+        working_dir: str | None = None,
+        stop_on_error: bool = True,
+        extra_env: dict[str, str] | None = None,
+    ) -> dict:
+        """Run a pipeline of actions as a single container command.
+
+        Supported step types:
+          - write_file: {type, path, content (str or bytes), binary?, executable?, append?}
+          - mkdir: {type, path}
+          - exec: {type, command, cwd?}
+          - read_file: {type, path, binary?, capture_as?}
+
+        For exec steps, per-step outputs and exit codes are captured under
+        /workspace/.agent/tmp_scripts/pipeline and summarized on return.
+
+        Args:
+            steps: Ordered list of action dicts.
+            working_dir: Optional relative path under workspace used as base CWD for exec steps.
+            stop_on_error: When True, abort pipeline on first failing exec.
+            extra_env: Optional env vars to export for the script execution only.
+
+        Returns:
+            Structured result dict containing overall status and per-step details.
+        """
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("steps must be a non-empty list")
+
+        pipeline_dir = self._resolve_workspace_path(".agent/tmp_scripts/pipeline")
+        pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+        pre_results: list[dict] = []
+        exec_items: list[tuple[int, dict]] = []
+        for idx, step in enumerate(steps):
+            stype = (step.get("type") or "").lower()
+            if stype == "write_file":
+                path = step.get("path")
+                if not path:
+                    raise ValueError("write_file requires 'path'")
+                content = step.get("content", "")
+                binary = bool(step.get("binary", False))
+                executable = bool(step.get("executable", False))
+                append = bool(step.get("append", False))
+                self.write_workspace_file(path, content, binary=binary, executable=executable, append=append)
+                pre_results.append({"index": idx, "type": stype, "status": "ok", "path": path})
+            elif stype == "mkdir":
+                path = step.get("path")
+                if not path:
+                    raise ValueError("mkdir requires 'path'")
+                p = self._resolve_workspace_path(path)
+                p.mkdir(parents=True, exist_ok=True)
+                pre_results.append({"index": idx, "type": stype, "status": "ok", "path": path})
+            elif stype in ("exec", "run", "command", "read_file"):
+                exec_items.append((idx, step))
+            else:
+                raise ValueError(f"Unsupported step type: {stype}")
+
+        task_id = f"pipeline_{uuid.uuid4()}"
+        script_lines: list[str] = []
+        if extra_env:
+            for k, v in extra_env.items():
+                ek = str(k)
+                ev = str(v).replace("'", "'\\''")
+                script_lines.append(f"export {ek}='{ev}'")
+        base_cwd = "/workspace"
+        if working_dir:
+            self._resolve_workspace_path(working_dir).mkdir(parents=True, exist_ok=True)
+            base_cwd = f"/workspace/{working_dir}"
+        script_lines.append(f"cd '{base_cwd}'")
+        script_lines.append("set -o pipefail")
+        script_lines.append("set -e" if stop_on_error else "set +e")
+
+        step_map: dict[int, dict] = {}
+        for idx, step in exec_items:
+            stype = (step.get("type") or "").lower()
+            out_base = f"/workspace/.agent/tmp_scripts/pipeline/{task_id}_{idx}"
+            if stype in ("exec", "run", "command"):
+                cmd = step.get("command")
+                if not cmd:
+                    raise ValueError("exec step requires 'command'")
+                cwd = step.get("cwd")
+                if cwd:
+                    self._resolve_workspace_path(cwd).mkdir(parents=True, exist_ok=True)
+                    script_lines.append(f"( cd '/workspace/{cwd}' && bash -lc \"{cmd}\" ) >'{out_base}.out' 2>&1")
+                else:
+                    script_lines.append(f"bash -lc \"{cmd}\" >'{out_base}.out' 2>&1")
+                script_lines.append(f"echo $? > '{out_base}.code'")
+                if stop_on_error:
+                    script_lines.append(f"test \"$(cat '{out_base}.code')\" -eq 0")
+                step_map[idx] = {"type": stype, "out": out_base + ".out", "code": out_base + ".code"}
+            elif stype == "read_file":
+                step_map[idx] = {"type": stype, "path": step.get("path"), "binary": bool(step.get("binary", False))}
+            else:
+                step_map[idx] = {"type": stype}
+
+        exec_output = ""
+        overall_exit = 0
+        if any((d.get("type") in ("exec", "run", "command")) for d in step_map.values()):
+            composite_cmd = "\n".join(script_lines)
+            overall_exit, exec_output = self.execute_command(composite_cmd, task_id)
+
+        results: list[dict] = []
+        pre_by_index = {r["index"]: r for r in pre_results}
+        for idx, step in enumerate(steps):
+            stype = (step.get("type") or "").lower()
+            if idx in pre_by_index:
+                results.append(pre_by_index[idx])
+                continue
+            meta = step_map.get(idx, {"type": stype})
+            if stype in ("exec", "run", "command"):
+                out_p = Path(meta.get("out")) if meta.get("out") else None
+                code_p = Path(meta.get("code")) if meta.get("code") else None
+                out_txt = ""
+                code_val = None
+                try:
+                    if out_p and out_p.exists():
+                        out_txt = out_p.read_text(errors="replace")
+                    if code_p and code_p.exists():
+                        code_val = int((code_p.read_text() or "0").strip() or "0")
+                except Exception as e:
+                    logger.warning(f"Failed reading pipeline step artifacts: {e}")
+                results.append({"index": idx, "type": stype, "exit_code": code_val, "output": out_txt})
+            elif stype == "read_file":
+                path = meta.get("path")
+                binary = bool(meta.get("binary", False))
+                try:
+                    content = self.read_workspace_file(path, binary=binary) if path else None
+                    results.append({"index": idx, "type": stype, "path": path, "binary": binary, "content": content})
+                except Exception as e:
+                    results.append({"index": idx, "type": stype, "path": path, "error": str(e)})
+            else:
+                results.append({"index": idx, "type": stype, "status": "ok"})
+
+        # best-effort cleanup
+        try:
+            for f in pipeline_dir.glob(f"{task_id}_*.out"):
+                f.unlink(missing_ok=True)
+            for f in pipeline_dir.glob(f"{task_id}_*.code"):
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        return {
+            "exit_code": overall_exit,
+            "exec_output": exec_output,
+            "results": results,
+        }
+
+    # ---------------------------
+    # Repository tracking helpers
+    # ---------------------------
+    def _tracked_repos_path(self) -> Path:
+        return (self.workspace_dir / ".agent" / "track_repos.json").resolve()
+
+    def load_tracked_repos(self) -> list[dict]:
+        path = self._tracked_repos_path()
+        if not path.exists():
+            return []
+        try:
+            import json
+            return json.loads(path.read_text()) or []
+        except Exception:
+            return []
+
+    def save_tracked_repos(self, repos: list[dict]) -> None:
+        try:
+            import json
+            path = self._tracked_repos_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(repos, indent=2, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"Failed to save tracked repos: {e}")
+
+    def add_tracked_repo(self, owner: str, repo: str, description: str | None = None, shorthand: str | None = None) -> None:
+        repos = self.load_tracked_repos()
+        shorthand_base = shorthand or repo
+        name = shorthand_base
+        existing = {r.get("name") for r in repos}
+        if name in existing:
+            i = 2
+            while f"{shorthand_base}-{i}" in existing:
+                i += 1
+            name = f"{shorthand_base}-{i}"
+        entry = {
+            "name": name,
+            "full": f"{owner}/{repo}",
+            "owner": owner,
+            "repo": repo,
+            "description": description or "",
+        }
+        repos.append(entry)
+        self.save_tracked_repos(repos)

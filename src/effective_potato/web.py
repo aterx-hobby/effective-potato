@@ -114,7 +114,7 @@ def get_http_log_level() -> Optional[int]:
 def create_app(workspace_dir: Path) -> Flask:
     app = Flask(__name__)
 
-    screenshots_dir = workspace_dir / ".agent_screenshots"
+    screenshots_dir = workspace_dir / ".agent" / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
 
     @app.get("/healthz")

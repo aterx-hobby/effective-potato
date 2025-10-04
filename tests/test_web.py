@@ -54,7 +54,7 @@ def test_create_app_routes(tmp_path: Path):
     ws = tmp_path
     app = create_app(ws)
     # Ensure the screenshots directory exists
-    d = ws / ".agent_screenshots"
+    d = ws / ".agent" / "screenshots"
     assert d.exists() and d.is_dir()
 
     # Use Flask test client to simulate requests

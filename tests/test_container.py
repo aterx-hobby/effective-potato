@@ -114,7 +114,7 @@ def test_workspace_directories_created(temp_workspace, temp_env_files):
     )
 
     assert Path(temp_workspace).exists()
-    assert (Path(temp_workspace) / ".tmp_agent_scripts").exists()
+    assert (Path(temp_workspace) / ".agent" / "tmp_scripts").exists()
 
 
 def test_build_image_without_env_file(temp_workspace, temp_env_files, caplog):
@@ -149,7 +149,7 @@ def test_execute_command_creates_script(temp_workspace, temp_env_files):
     # Create a mock script to test script creation logic
     task_id = "test123"
     command = "echo 'Hello World'"
-    script_dir = Path(temp_workspace) / ".tmp_agent_scripts"
+    script_dir = Path(temp_workspace) / ".agent" / "tmp_scripts"
     script_path = script_dir / f"task_{task_id}.sh"
 
     # Write the script manually to test the logic
@@ -172,7 +172,7 @@ def test_cleanup_removes_script_files(temp_workspace, temp_env_files):
     )
 
     # Create some mock script files
-    script_dir = Path(temp_workspace) / ".tmp_agent_scripts"
+    script_dir = Path(temp_workspace) / ".agent" / "tmp_scripts"
     script1 = script_dir / "task_test1.sh"
     script2 = script_dir / "task_test2.sh"
     script3 = script_dir / "task_test3.sh"
@@ -206,7 +206,7 @@ def test_script_cleanup_after_execution(temp_workspace, temp_env_files):
 
     # Manually create and execute a script to simulate the execute_command behavior
     task_id = "cleanup_test"
-    script_dir = Path(temp_workspace) / ".tmp_agent_scripts"
+    script_dir = Path(temp_workspace) / ".agent" / "tmp_scripts"
     script_path = script_dir / f"task_{task_id}.sh"
     
     # Create the script
@@ -284,7 +284,8 @@ def test_execute_command_includes_env_vars(temp_workspace, temp_env_files):
         
         # Manually create a script to verify the content
         task_id = "test_env"
-        script_dir = workspace / ".tmp_agent_scripts"
+        script_dir = workspace / ".agent" / "tmp_scripts"
+        script_dir.mkdir(parents=True, exist_ok=True)
         script_path = script_dir / f"task_{task_id}.sh"
         
         # Build script content with environment variables prefixed
