@@ -155,9 +155,27 @@ docker exec $containerid$ /workspace/.tmp_agent_scripts/task_$taskid$.sh
 
 ## Environment Configuration
 
-The `local/.env` file is copied to the container's user `.profile` during build. This allows you to set custom environment variables that will be available in all commands.
+The `local/.env` file is loaded and validated at startup. Environment variables defined in this file are automatically exported at the beginning of each command execution script.
+
+**Important:** The `.env` file must contain only environment variable assignments (e.g., `VAR=value`) and comments. Any other content will cause a validation error.
 
 If no `local/.env` file is present, a warning is printed on startup. See `local/sample.env` for the format.
+
+### How it works:
+
+When you execute a command, the environment variables from `local/.env` are automatically prefixed into the execution script:
+
+```bash
+#!/bin/bash
+
+export GITHUB_PERSONAL_ACCESS_TOKEN='5678'
+export HF_TOKEN='1234'
+
+# Your command here
+ls -la /
+```
+
+This ensures that all environment variables are available to every command executed in the container.
 
 ## License
 

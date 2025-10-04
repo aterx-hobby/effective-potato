@@ -81,8 +81,11 @@ Commands are executed via bash scripts written to `workspace/.tmp_agent_scripts/
 - Scripts are marked executable before execution
 
 ### Environment File Handling
-- Checks for `local/.env` during container build
-- Appends to container's user `.profile` if present
+- Validates `local/.env` file format during initialization
+- Only allows environment variable assignments (e.g., VAR=value)
+- Rejects any non-environment variable content
+- Loads environment variables into memory at startup
+- Prefixes them into each execution script automatically
 - Displays warning with instructions if missing
 - References `local/sample.env` for format
 
