@@ -164,9 +164,28 @@ class ContainerManager:
         if stderr:
             output += stderr.decode("utf-8")
 
+        # Clean up the script file after execution
+        try:
+            if script_path.exists():
+                script_path.unlink()
+                logger.debug(f"Cleaned up script: {script_path}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up script {script_path}: {e}")
+
         return exit_code, output
 
     def cleanup(self) -> None:
         """Clean up resources."""
         self.stop_container()
+        
+        # Clean up any remaining script files
+        script_dir = self.workspace_dir / ".tmp_agent_scripts"
+        if script_dir.exists():
+            for script_file in script_dir.glob("task_*.sh"):
+                try:
+                    script_file.unlink()
+                    logger.debug(f"Cleaned up remaining script: {script_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up script {script_file}: {e}")
+        
         logger.info("Cleanup complete")
