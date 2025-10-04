@@ -1067,7 +1067,7 @@ class ContainerManager:
         Returns a list of dicts including:
           - owner, repo, full, name, path
           - present (bool): whether the directory currently exists
-          - abs_path (str): absolute path on disk
+          - workspace_path (str): path scoped to the container mount (e.g., /workspace/<path>)
         """
         repos = self.load_tracked_repos()
         results: list[dict] = []
@@ -1080,6 +1080,45 @@ class ContainerManager:
             present = abs_path.exists() and abs_path.is_dir()
             out = dict(r)
             out["present"] = bool(present)
-            out["abs_path"] = str(abs_path)
+            # Expose only a workspace-scoped path, not the host absolute path
+            rel_str = str(rel).lstrip("/")
+            out["workspace_path"] = f"/workspace/{rel_str}"
             results.append(out)
         return results
+
+    def prune_tracked_repositories(self, *, dry_run: bool = False) -> dict:
+        """Remove tracked repository entries whose directories are missing.
+
+        Args:
+            dry_run: When True, do not modify the tracking file; just report what would change.
+
+        Returns:
+            A summary dict with counts and affected entries.
+        """
+        items = self.list_local_repositories()
+        to_remove = [r for r in items if not r.get("present")]
+        kept = [r for r in items if r.get("present")]
+
+        if not dry_run:
+            # Save only the kept items back to track_repos.json
+            # Convert back to storage shape (drop computed fields)
+            stored: list[dict] = []
+            for r in kept:
+                stored.append({
+                    "name": r.get("name"),
+                    "full": r.get("full"),
+                    "owner": r.get("owner"),
+                    "repo": r.get("repo"),
+                    "path": r.get("path"),
+                    "description": r.get("description", ""),
+                    **({"created_at": r.get("created_at")} if r.get("created_at") else {}),
+                    **({"updated_at": r.get("updated_at")} if r.get("updated_at") else {}),
+                })
+            self.save_tracked_repos(stored)
+
+        return {
+            "dry_run": bool(dry_run),
+            "removed_count": len(to_remove),
+            "kept_count": len(kept),
+            "removed": [{"full": r.get("full"), "path": r.get("path")} for r in to_remove],
+        }

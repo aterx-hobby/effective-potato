@@ -428,6 +428,12 @@ def initialize_server() -> None:
     container_manager.build_image()
     container_manager.start_container()
 
+    # On startup, repair/cleanup the local tracked repos list by removing entries whose directories are missing
+    try:
+        container_manager.prune_tracked_repositories(dry_run=False)
+    except Exception as e:
+        logger.warning(f"Workspace prune on startup failed: {e}")
+
     # Start HTTP server for screenshots and future endpoints
     from pathlib import Path
     bind_ip, port, public_host = get_server_config()

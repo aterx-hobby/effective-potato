@@ -27,7 +27,8 @@ def test_add_and_list_local_repositories_presence_detection():
         assert it["repo"] == "myrepo"
         assert it["path"] == "myrepo"
         assert it["present"] is True
-        assert Path(it["abs_path"]).exists()
+        # workspace_path points to /workspace/<path> in the container; presence True indicates the local dir exists
+        assert it["workspace_path"].endswith("/workspace/myrepo")
 
         # Now simulate deletion
         (ws / "myrepo").rmdir()
