@@ -7,3 +7,4 @@ workspace/.tmp_agent_scripts/
 .pytest_cache/
 dist/
 build/
+environment.sh

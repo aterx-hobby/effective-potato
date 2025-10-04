@@ -16,10 +16,12 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Note: Snap packages like rustup need snapd service running
-# which typically doesn't work well in Docker. We'll install rust via rustup.sh instead
+# Install Rust via rustup
 RUN apt-get update && apt-get install -y curl && \
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh && \
+    chmod +x /tmp/rustup.sh && \
+    /tmp/rustup.sh -y --default-toolchain stable && \
+    rm /tmp/rustup.sh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Add Go to PATH
@@ -29,8 +31,9 @@ ENV PATH="/usr/lib/go-1.23/bin:${PATH}"
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy environment file if it exists (will be handled by build context)
-COPY environment.sh /tmp/environment.sh 2>/dev/null || true
-RUN if [ -f /tmp/environment.sh ]; then \
+# Note: This file must exist in build context - create empty one if needed
+COPY environment.sh /tmp/environment.sh
+RUN if [ -s /tmp/environment.sh ]; then \
         cat /tmp/environment.sh >> /root/.profile; \
     fi
 
