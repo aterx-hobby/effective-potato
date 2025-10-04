@@ -303,3 +303,65 @@ def test_execute_command_includes_env_vars(temp_workspace, temp_env_files):
         assert "echo 'test command'" in content
 
 
+def test_is_github_available_without_token(temp_workspace, temp_env_files):
+    """Test that GitHub is not available without token."""
+    env_file, sample_env = temp_env_files
+    # Don't write a token to env_file
+    manager = ContainerManager(
+        workspace_dir=temp_workspace,
+        env_file=str(env_file),
+        sample_env_file=str(sample_env),
+    )
+    
+    assert not manager.is_github_available()
+
+
+def test_is_github_available_with_token(temp_workspace):
+    """Test that GitHub is available with token."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        
+        env_file = Path(tmpdir) / ".env"
+        env_file.write_text("GITHUB_PERSONAL_ACCESS_TOKEN=test_token\n")
+        
+        sample_env = Path(tmpdir) / "sample.env"
+        sample_env.write_text("# Sample\n")
+        
+        manager = ContainerManager(
+            workspace_dir=str(workspace),
+            env_file=str(env_file),
+            sample_env_file=str(sample_env),
+        )
+        
+        assert manager.is_github_available()
+
+
+def test_list_repositories_without_github_available(temp_workspace, temp_env_files):
+    """Test that list_repositories returns error without GitHub token."""
+    env_file, sample_env = temp_env_files
+    manager = ContainerManager(
+        workspace_dir=temp_workspace,
+        env_file=str(env_file),
+        sample_env_file=str(sample_env),
+    )
+    
+    exit_code, output = manager.list_repositories()
+    assert exit_code == 1
+    assert "GitHub CLI is not available" in output
+
+
+def test_clone_repository_without_github_available(temp_workspace, temp_env_files):
+    """Test that clone_repository returns error without GitHub token."""
+    env_file, sample_env = temp_env_files
+    manager = ContainerManager(
+        workspace_dir=temp_workspace,
+        env_file=str(env_file),
+        sample_env_file=str(sample_env),
+    )
+    
+    exit_code, output = manager.clone_repository("owner", "repo")
+    assert exit_code == 1
+    assert "GitHub CLI is not available" in output
+
+

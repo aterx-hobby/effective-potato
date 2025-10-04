@@ -3,6 +3,7 @@
 import os
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Optional
 import docker
@@ -157,6 +158,11 @@ class ContainerManager:
         )
 
         logger.info(f"Container started with ID: {self.container.id[:12]}")
+        
+        # Authenticate GitHub CLI if token is available
+        if "GITHUB_PERSONAL_ACCESS_TOKEN" in self.env_vars:
+            self._authenticate_github()
+        
         return self.container
 
     def stop_container(self) -> None:
@@ -171,6 +177,43 @@ class ContainerManager:
             pass  # Container doesn't exist, nothing to do
         except Exception as e:
             logger.warning(f"Error stopping container: {e}")
+
+    def _authenticate_github(self) -> None:
+        """Authenticate GitHub CLI with the token from environment variables."""
+        if not self.container:
+            raise RuntimeError("Container is not running")
+        
+        token = self.env_vars.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+        if not token:
+            return
+        
+        logger.info("Authenticating GitHub CLI...")
+        
+        # Authenticate gh using the token
+        auth_cmd = f"echo '{token}' | gh auth login --with-token"
+        exec_result = self.container.exec_run(
+            cmd=["bash", "-c", auth_cmd],
+            demux=True,
+        )
+        
+        if exec_result.exit_code == 0:
+            logger.info("GitHub CLI authenticated successfully")
+        else:
+            stdout, stderr = exec_result.output
+            error_output = ""
+            if stdout:
+                error_output += stdout.decode("utf-8")
+            if stderr:
+                error_output += stderr.decode("utf-8")
+            logger.warning(f"GitHub CLI authentication failed: {error_output}")
+
+    def is_github_available(self) -> bool:
+        """Check if GitHub CLI is authenticated and available.
+        
+        Returns:
+            True if GitHub CLI is authenticated, False otherwise
+        """
+        return "GITHUB_PERSONAL_ACCESS_TOKEN" in self.env_vars
 
     def execute_command(self, command: str, task_id: str) -> tuple[int, str]:
         """Execute a command in the container via a script file.
@@ -235,6 +278,59 @@ class ContainerManager:
             logger.warning(f"Failed to clean up script {script_path}: {e}")
 
         return exit_code, output
+
+    def list_repositories(self, owner: str | None = None, limit: int = 30) -> tuple[int, str]:
+        """List GitHub repositories.
+        
+        Args:
+            owner: The username or organization to list repos for. If None, lists repos for the authenticated user.
+            limit: Maximum number of repositories to list (default: 30)
+        
+        Returns:
+            Tuple of (exit_code, output)
+        """
+        if not self.is_github_available():
+            return 1, "GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env"
+        
+        if not self.container:
+            raise RuntimeError("Container is not running")
+        
+        # Generate unique task ID
+        task_id = f"gh_list_{uuid.uuid4()}"
+        
+        # Build the gh repo list command
+        if owner:
+            command = f"gh repo list {owner} --limit {limit}"
+        else:
+            command = f"gh repo list --limit {limit}"
+        
+        # Execute using the standard execute_command method
+        return self.execute_command(command, task_id)
+
+    def clone_repository(self, owner: str, repo: str) -> tuple[int, str]:
+        """Clone a GitHub repository to the workspace.
+        
+        Args:
+            owner: The repository owner (username or organization)
+            repo: The repository name
+        
+        Returns:
+            Tuple of (exit_code, output)
+        """
+        if not self.is_github_available():
+            return 1, "GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env"
+        
+        if not self.container:
+            raise RuntimeError("Container is not running")
+        
+        # Generate unique task ID
+        task_id = f"gh_clone_{uuid.uuid4()}"
+        
+        # Build the clone command - clone into workspace
+        command = f"cd /workspace && gh repo clone {owner}/{repo}"
+        
+        # Execute using the standard execute_command method
+        return self.execute_command(command, task_id)
 
     def cleanup(self) -> None:
         """Clean up resources."""
