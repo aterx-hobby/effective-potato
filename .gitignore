@@ -1,10 +1,13 @@
 local/.env
+local/*-key
+local/*.pub
 *.pyc
 __pycache__/
-venv/
-workspace/.tmp_agent_scripts/
+venv/*
+workspace/*
 *.egg-info/
 .pytest_cache/
 dist/
 build/
 environment.sh
+local/effective-potato-key

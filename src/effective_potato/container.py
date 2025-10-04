@@ -3,9 +3,12 @@
 import os
 import logging
 import re
+import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
+
 import docker
 from docker.models.containers import Container
 
@@ -115,23 +118,201 @@ class ContainerManager:
         """Build the Docker image with Ubuntu 24.04 and required packages."""
         logger.info("Building Docker image...")
 
-        # Build the image
-        dockerfile_path = Path("Dockerfile").absolute()
+        # Build the images: first base, then runner
+        base_tag = "effective-potato-base"
+        runner_tag = self.image_name
         build_context = Path(".").absolute()
 
-        image, build_logs = self.client.images.build(
-            path=str(build_context),
-            dockerfile=str(dockerfile_path),
-            tag=self.image_name,
-            rm=True,
-            forcerm=True,
-        )
+        # Verbosity toggle: concise spinner by default; auto-disable spinner when not interactive (JSON-RPC stdio)
+        verbose = os.getenv("POTATO_VERBOSE_BUILD", "").lower() in ("1", "true", "yes", "y", "on")
+        interactive_stdout = sys.stdout.isatty()
+        allow_concise = (not verbose) and interactive_stdout
 
-        for log in build_logs:
-            if "stream" in log:
-                logger.debug(log["stream"].strip())
+        # Spinner/setup for concise mode
+        step_re = re.compile(r"(?i)\bstep\s+(\d+)\s*/\s*(\d+)\s*:\s*(.*)")
+        spinner_cycle = ["-", "\\", "|", "/"]
+        spinner_idx = 0
+        current_step: tuple[int, int, str] | None = None
+        step_start_ts: float | None = None
+        last_shown_secs = -1
 
-        logger.info(f"Successfully built image: {self.image_name}")
+        def concise_print(update_now: bool = False) -> None:
+            if not allow_concise:
+                return
+            nonlocal spinner_idx, last_shown_secs
+            if not current_step or step_start_ts is None:
+                return
+            elapsed = int(time.time() - step_start_ts)
+            if not update_now and elapsed == last_shown_secs:
+                return
+            last_shown_secs = elapsed
+            spinner_char = spinner_cycle[spinner_idx % len(spinner_cycle)]
+            spinner_idx += 1
+            idx, total, desc = current_step
+            trimmed = desc.strip()
+            if len(trimmed) > 100:
+                trimmed = trimmed[:97] + "..."
+            line = f"Step {idx}/{total}: {trimmed}  [{spinner_char} {elapsed}s]"
+            try:
+                sys.stdout.write("\r" + line)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        def start_new_step(idx: int, total: int, desc: str) -> None:
+            if not allow_concise:
+                return
+            nonlocal current_step, step_start_ts, last_shown_secs, spinner_idx
+            if current_step is not None:
+                try:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            current_step = (idx, total, desc)
+            step_start_ts = time.time()
+            spinner_idx = 0
+            last_shown_secs = -1
+            concise_print(update_now=True)
+
+        def finish_concise() -> None:
+            if not allow_concise:
+                return
+            try:
+                if current_step is not None:
+                    concise_print(update_now=True)
+                    sys.stdout.write("\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        # Use low-level API to stream build logs live
+        def run_build(dockerfile: Path, tag: str, label: str) -> None:
+            # Inner function to execute a single build with spinner/verbose modes
+            nonlocal spinner_idx, current_step, step_start_ts, last_shown_secs
+            spinner_idx = 0
+            current_step = None
+            step_start_ts = None
+            last_shown_secs = -1
+            logger.info(f"Building {label} image ({tag})...")
+            try:
+                build_stream = self.client.api.build(
+                    path=str(build_context),
+                    dockerfile=str(dockerfile),
+                    tag=tag,
+                    rm=True,
+                    forcerm=True,
+                    decode=True,
+                )
+
+                for chunk in build_stream:
+                    try:
+                        if "error" in chunk:
+                            if not verbose:
+                                finish_concise()
+                            err = chunk.get("error")
+                            logger.error(err)
+                            raise docker.errors.BuildError(err, build_log=iter(()))
+
+                        if verbose or not interactive_stdout:
+                            if "stream" in chunk:
+                                msg = chunk["stream"].rstrip()
+                                if msg:
+                                    logger.info(msg)
+                            elif "status" in chunk:
+                                status = chunk.get("status", "")
+                                progress = chunk.get("progress", "")
+                                detail = chunk.get("progressDetail", {})
+                                if progress:
+                                    logger.info(f"{status} {progress}")
+                                elif detail:
+                                    logger.info(f"{status} {detail}")
+                                elif status:
+                                    logger.info(status)
+                            else:
+                                logger.info(str(chunk))
+                        else:
+                            if "stream" in chunk:
+                                msg = chunk["stream"].strip()
+                                if not msg:
+                                    concise_print()
+                                    continue
+                                m = step_re.search(msg)
+                                if m:
+                                    idx = int(m.group(1))
+                                    total = int(m.group(2))
+                                    desc = m.group(3)
+                                    start_new_step(idx, total, desc)
+                                    logger.info(f"Step {idx}/{total}: {desc.strip()}")
+                                elif msg.lower().startswith("successfully built") or msg.lower().startswith("successfully tagged"):
+                                    finish_concise()
+                                else:
+                                    concise_print()
+                            else:
+                                concise_print()
+                    except Exception as e:
+                        logger.debug(f"Failed to parse build log chunk: {e}; raw={chunk}")
+            except TypeError:
+                # Fallback for SDKs without low-level streaming signature
+                image, build_logs = self.client.images.build(
+                    path=str(build_context),
+                    dockerfile=str(dockerfile),
+                    tag=tag,
+                    rm=True,
+                    forcerm=True,
+                )
+                for log in build_logs:
+                    if "error" in log:
+                        if not verbose:
+                            finish_concise()
+                        logger.error(log.get("error"))
+                        continue
+
+                    if verbose or not interactive_stdout:
+                        if "stream" in log:
+                            msg = log["stream"].rstrip()
+                            if msg:
+                                logger.info(msg)
+                        elif "status" in log:
+                            status = log.get("status", "")
+                            progress = log.get("progress", "")
+                            detail = log.get("progressDetail", {})
+                            if progress:
+                                logger.info(f"{status} {progress}")
+                            elif detail:
+                                logger.info(f"{status} {detail}")
+                            elif status:
+                                logger.info(status)
+                        else:
+                            logger.info(str(log))
+                    else:
+                        if "stream" in log:
+                            msg = log["stream"].strip()
+                            if not msg:
+                                concise_print()
+                                continue
+                            m = step_re.search(msg)
+                            if m:
+                                idx = int(m.group(1))
+                                total = int(m.group(2))
+                                desc = m.group(3)
+                                start_new_step(idx, total, desc)
+                                logger.info(f"Step {idx}/{total}: {desc.strip()}")
+                            elif msg.lower().startswith("successfully built") or msg.lower().startswith("successfully tagged"):
+                                finish_concise()
+                            else:
+                                concise_print()
+                        else:
+                            concise_print()
+            except docker.errors.BuildError:
+                # Already logged; re-raise to propagate failure
+                raise
+
+        # Build base first (Dockerfile.base), then runner (Dockerfile)
+        run_build(Path("Dockerfile.base").absolute(), base_tag, label="base")
+        logger.info(f"Successfully built image: {base_tag}")
+        run_build(Path("Dockerfile").absolute(), runner_tag, label="runner")
+        logger.info(f"Successfully built image: {runner_tag}")
 
     def start_container(self) -> Container:
         """Start the Docker container with workspace mounted.
@@ -144,10 +325,27 @@ class ContainerManager:
 
         logger.info("Starting Docker container...")
 
-        # Mount workspace directory
-        volumes = {
+        # Mount workspace directory (rw)
+        volumes: dict[str, dict[str, str]] = {
             str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
         }
+
+        # Optionally mount a host SSH private key read-only
+        # Env variables (host side, loaded earlier):
+        #   EFFECTIVE_POTATO_SSH_KEY_PATH: absolute path to private key file
+        ssh_key_path = self.env_vars.get("EFFECTIVE_POTATO_SSH_KEY_PATH") or self.env_vars.get("SSH_PRIVATE_KEY_PATH")
+        ssh_host_path: Optional[Path] = None
+        if ssh_key_path:
+            try:
+                p = Path(ssh_key_path).expanduser().absolute()
+                if p.exists() and p.is_file():
+                    ssh_host_path = p
+                    # Bind mount into container at a known read-only path
+                    volumes[str(p)] = {"bind": "/ssh-ro/id_rsa", "mode": "ro"}
+                else:
+                    logger.warning(f"SSH key path does not exist or is not a file: {p}")
+            except Exception as e:
+                logger.warning(f"Invalid SSH key path '{ssh_key_path}': {e}")
 
         self.container = self.client.containers.run(
             self.image_name,
@@ -155,15 +353,67 @@ class ContainerManager:
             detach=True,
             volumes=volumes,
             remove=False,
+            mem_limit="4g",
+            nano_cpus=2_000_000_000,
+            environment={"DISPLAY": ":0"},
         )
 
         logger.info(f"Container started with ID: {self.container.id[:12]}")
         
+        # Configure git user and SSH key for ubuntu
+        try:
+            self._setup_git_and_ssh()
+        except Exception as e:
+            logger.warning(f"Failed to set up git/ssh: {e}")
+
         # Authenticate GitHub CLI if token is available
         if "GITHUB_PERSONAL_ACCESS_TOKEN" in self.env_vars:
             self._authenticate_github()
         
         return self.container
+
+    def _setup_git_and_ssh(self) -> None:
+        """Initialize git config and install SSH private key for ubuntu if provided.
+
+        Uses env vars:
+          - GIT_USER_NAME or EFFECTIVE_POTATO_GIT_NAME (default: 'effective-potato')
+          - GIT_USER_EMAIL or EFFECTIVE_POTATO_GIT_EMAIL (default: 'effective-potato@aterx.com')
+          - EFFECTIVE_POTATO_SSH_KEY_PATH or SSH_PRIVATE_KEY_PATH (optional, host path)
+        """
+        if not self.container:
+            return
+
+        git_name = (
+            self.env_vars.get("GIT_USER_NAME")
+            or self.env_vars.get("EFFECTIVE_POTATO_GIT_NAME")
+            or "effective-potato"
+        )
+        git_email = (
+            self.env_vars.get("GIT_USER_EMAIL")
+            or self.env_vars.get("EFFECTIVE_POTATO_GIT_EMAIL")
+            or "effective-potato@aterx.com"
+        )
+
+        # Set git config as ubuntu
+        cfg_cmd = (
+            f"git config --global user.name '{git_name.replace("'", "'\\''")}' && "
+            f"git config --global user.email '{git_email.replace("'", "'\\''")}'"
+        )
+        self.container.exec_run(cmd=["bash", "-lc", cfg_cmd], user="ubuntu", demux=True)
+
+        # Install SSH key if present via mounted ro path
+        # Key expected at /ssh-ro/id_rsa (mounted if provided)
+        install_key_script = (
+            "set -e; "
+            "if [ -f /ssh-ro/id_rsa ]; then "
+            "  mkdir -p /home/ubuntu/.ssh; "
+            "  cp /ssh-ro/id_rsa /home/ubuntu/.ssh/id_rsa; "
+            "  chown -R ubuntu:ubuntu /home/ubuntu/.ssh; "
+            "  chmod 700 /home/ubuntu/.ssh; chmod 600 /home/ubuntu/.ssh/id_rsa; "
+            "fi"
+        )
+        # Run as root to ensure ownership/permissions adjustments succeed
+        self.container.exec_run(cmd=["bash", "-lc", install_key_script], user="root", demux=True)
 
     def stop_container(self) -> None:
         """Stop and remove the container if it's running."""
@@ -188,9 +438,13 @@ class ContainerManager:
             return
         
         logger.info("Authenticating GitHub CLI...")
-        
-        # Authenticate gh using the token
-        auth_cmd = f"echo '{token}' | gh auth login --with-token"
+
+        # Authenticate gh using the token with a timeout to avoid hangs
+        auth_script = (
+            f"set -e; echo '{token}' | gh auth login --with-token || true; "
+            "gh auth status || true"
+        )
+        auth_cmd = f"timeout 20s bash -lc \"{auth_script}\""
         exec_result = self.container.exec_run(
             cmd=["bash", "-c", auth_cmd],
             demux=True,
@@ -244,6 +498,9 @@ class ContainerManager:
         if self.env_vars:
             script_content += "\n"
         
+        # Ensure DISPLAY is set for X apps
+        if "DISPLAY" not in self.env_vars:
+            script_content += "export DISPLAY=:0\n"
         # Add the actual command
         script_content += f"{command}\n"
         
@@ -255,8 +512,9 @@ class ContainerManager:
         # Execute the script in the container
         container_script_path = f"/workspace/.tmp_agent_scripts/task_{task_id}.sh"
         exec_result = self.container.exec_run(
-            cmd=container_script_path,
+            cmd=["bash", "-lc", container_script_path],
             demux=True,
+            user="ubuntu",
         )
 
         exit_code = exec_result.exit_code

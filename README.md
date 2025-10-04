@@ -31,7 +31,7 @@ cd effective-potato
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -e .
+pip install -e '.[dev]'
 ```
 
 3. (Optional) Create a custom environment file:
@@ -148,9 +148,17 @@ Clone a GitHub repository into the workspace directory. This tool is only availa
 
 ### Running Tests
 
+Use the provided harness to set up the environment and run pytest:
+
 ```bash
-source venv/bin/activate
-pytest tests/ -v
+./run-tests.sh                # unit tests only (default)
+RUN_INTEGRATION_TESTS=1 ./run-tests.sh   # include integration tests
+```
+
+You can pass any extra pytest args through the harness, for example:
+
+```bash
+./run-tests.sh -q tests/test_container.py::test_validate_and_load_env_file_valid
 ```
 
 ### Project Structure

@@ -8,6 +8,12 @@ from mcp.types import Tool, TextContent
 from pydantic import AnyUrl
 
 from .container import ContainerManager
+from .web import (
+    create_app as create_http_app,
+    start_http_server,
+    get_server_config,
+    build_screenshot_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +23,9 @@ app = Server("effective-potato")
 
 # Container manager instance
 container_manager: ContainerManager | None = None
+_http_thread = None
+_public_host = None
+_public_port = None
 
 
 @app.list_tools()
@@ -35,6 +44,29 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["command"],
+            },
+        ),
+        Tool(
+            name="launch_and_screenshot",
+            description="Launch an X11 application and take a fullscreen screenshot via xfce4-screenshooter",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "launch_command": {
+                        "type": "string",
+                        "description": "Command to launch the X11 app (e.g., 'xclock' or '/usr/bin/gedit')",
+                    },
+                    "delay_seconds": {
+                        "type": "integer",
+                        "description": "Seconds to wait after launching before screenshot",
+                        "default": 2
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional filename for the screenshot (png). When omitted, a timestamped name is used.",
+                    }
+                },
+                "required": ["launch_command"],
             },
         ),
     ]
@@ -138,6 +170,44 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         
         return [TextContent(type="text", text=response)]
     
+    elif name == "launch_and_screenshot":
+        launch_command = arguments.get("launch_command")
+        delay = int(arguments.get("delay_seconds", 2))
+        filename = arguments.get("filename")
+        if not launch_command:
+            raise ValueError("'launch_command' is required")
+        
+        # Build the script to launch the app and screenshot
+        import time
+        import datetime as dt
+        shot_dir = "/workspace/.agent_screenshots"
+        # Create directory and run command
+        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        out_name = filename or f"screenshot_{ts}.png"
+        out_path = f"{shot_dir}/{out_name}"
+        
+        cmd = (
+            "mkdir -p /workspace/.agent_screenshots && "
+            f"({launch_command}) >/tmp/launch.log 2>&1 & "
+            f"sleep {delay}; "
+            "export DISPLAY=:0; "
+            "xdotool key XF86Refresh >/dev/null 2>&1 || true; "
+            f"xfce4-screenshooter -f -s '{out_path}'"
+        )
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(cmd, task_id)
+        # Build URL if web server is running
+        if _public_host and _public_port:
+            # The filename for URL is relative to screenshots dir
+            fname = out_name
+            url = build_screenshot_url(_public_host, int(_public_port), fname)
+            render_hint = f"To render the screenshot in chat, embed this URL as an image: ![screenshot]({url})"
+            saved_line = f"Saved: {out_path}\nURL: {url}\n{render_hint}"
+        else:
+            saved_line = f"Saved: {out_path}"
+        response = f"Exit code: {exit_code}\n{saved_line}\n\nOutput:\n{output}"
+        return [TextContent(type="text", text=response)]
+    
     else:
         raise ValueError(f"Unknown tool: {name}")
 
@@ -160,6 +230,18 @@ def initialize_server() -> None:
     # Build and start container
     container_manager.build_image()
     container_manager.start_container()
+
+    # Start HTTP server for screenshots and future endpoints
+    from pathlib import Path
+    bind_ip, port, public_host = get_server_config()
+    http_app = create_http_app(Path(container_manager.workspace_dir))
+    thread = start_http_server(http_app, bind_ip, port)
+
+    # Keep references for URL building
+    global _http_thread, _public_host, _public_port
+    _http_thread = thread
+    _public_host = public_host
+    _public_port = port
 
     logger.info("Server initialized successfully")
 
