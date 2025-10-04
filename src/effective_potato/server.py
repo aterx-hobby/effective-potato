@@ -145,6 +145,19 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="potato_workspace_find",
+            description=(
+                "Run a find command within the workspace (or a subdirectory), excluding .git and any directories "
+                "with names containing 'venv' or '_env' to avoid noisy results. Path must be workspace-relative."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Optional workspace-relative path to search under (default: '.')"}
+                }
+            },
+        ),
+        Tool(
             name="potato_workspace_interact_and_record",
             description=(
                 "Focus a window by title, send a sequence of key inputs, and record the desktop as a sequence of screenshots "
@@ -517,6 +530,24 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         script = "\n".join(lines)
         task_id = str(uuid.uuid4())
         exit_code, output = container_manager.execute_command(script, task_id)
+        return [TextContent(type="text", text=f"Exit code: {exit_code}\n\nOutput:\n{output}")]
+    elif name == "potato_workspace_find":
+        # Validate workspace-relative path
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        # Prevent absolute paths or traversal; resolve within workspace via container-side cd
+        # Build a safe command using bash to cd into /workspace and then into the relative path.
+        rel = str(subpath).lstrip("/")
+        # find with prune rules: skip .git, *venv*, *_env*
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel.replace("'", "'\\''")}' && "
+            "find . -type d "
+            "( -name .git -o -name '*venv*' -o -name '*_env*' ) -prune -o -print"
+        )
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(find_cmd, task_id)
         return [TextContent(type="text", text=f"Exit code: {exit_code}\n\nOutput:\n{output}")]
     elif name == "potato_workspace_list_repositories":
         import json
