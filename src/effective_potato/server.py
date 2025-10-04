@@ -35,7 +35,10 @@ async def list_tools() -> list[Tool]:
     tools = [
         Tool(
             name="execute_command",
-            description="Execute a command in the sandboxed Ubuntu container (supports optional timeout)",
+            description=(
+                "Last resort: execute a raw bash command in the sandboxed container (supports optional timeout). "
+                "Prefer dedicated published tools when available; avoid crafting custom commands unless necessary."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -102,6 +105,43 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="potato_workspace_mouse_actions",
+            description=(
+                "Move the mouse, click (mousedown/mouseup), or get mouse location using xdotool. "
+                "Optionally focus a window by title before performing actions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "window_title": {"type": "string", "description": "Optional substring to match and focus via xdotool search --any"},
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["move", "move_relative", "mousedown", "mouseup", "get_location"]},
+                                "x": {"type": "integer"},
+                                "y": {"type": "integer"},
+                                "dx": {"type": "integer"},
+                                "dy": {"type": "integer"},
+                                "button": {"type": "integer", "description": "Mouse button number for down/up"},
+                                "sync": {"type": "boolean", "default": False},
+                                "clearmodifiers": {"type": "boolean", "default": False},
+                                "screen": {"type": "integer"},
+                                "window_id": {"type": "string"},
+                                "polar": {"type": "boolean", "default": False},
+                                "shell": {"type": "boolean", "default": False},
+                                "prefix": {"type": "string"}
+                            },
+                            "required": ["type"],
+                        },
+                        "description": "Ordered list of mouse actions to perform"
+                    }
+                },
+                "required": ["actions"],
             },
         ),
         Tool(
@@ -395,6 +435,89 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             fname = f"{base}.webm"
             payload["video_url"] = _b(_public_host, int(_public_port), fname)
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+    elif name == "potato_workspace_mouse_actions":
+        import json
+        window_title = arguments.get("window_title")
+        actions = arguments.get("actions") or []
+        if not isinstance(actions, list) or not actions:
+            raise ValueError("'actions' must be a non-empty array")
+
+        lines = ["set -e"]
+        # Optionally focus window by title (first match)
+        if window_title:
+            pattern = str(window_title).replace("'", "'\\''")
+            lines += [
+                f"win_id=\"$(xdotool search --any '{pattern}' | head -n1)\"",
+                "test -n \"$win_id\" || { echo 'window not found' >&2; exit 1; }",
+                "xdotool windowactivate $win_id && xdotool windowfocus $win_id",
+            ]
+        else:
+            lines += ["win_id="]
+
+        def flag(b: bool, name: str) -> str:
+            return f" --{name}" if b else ""
+
+        for idx, act in enumerate(actions):
+            atype = (act.get("type") or "").lower()
+            if atype == "move":
+                x = int(act.get("x"))
+                y = int(act.get("y"))
+                sync = bool(act.get("sync", False))
+                cm = bool(act.get("clearmodifiers", False))
+                screen = act.get("screen")
+                win = act.get("window_id") or "$win_id"
+                cmd = f"xdotool mousemove{flag(cm, 'clearmodifiers')}{flag(sync, 'sync')}"
+                if screen is not None:
+                    cmd += f" --screen {int(screen)}"
+                if win:
+                    cmd += f" --window {win}"
+                cmd += f" {x} {y}"
+                lines.append(cmd)
+            elif atype == "move_relative":
+                dx = int(act.get("dx"))
+                dy = int(act.get("dy"))
+                sync = bool(act.get("sync", False))
+                cm = bool(act.get("clearmodifiers", False))
+                polar = bool(act.get("polar", False))
+                cmd = f"xdotool mousemove_relative{flag(cm, 'clearmodifiers')}{flag(sync, 'sync')}{flag(polar, 'polar')}"
+                # To support negative numbers with getopt parsing, add '--' before coordinates
+                cmd += f" -- {dx} {dy}"
+                lines.append(cmd)
+            elif atype == "mousedown":
+                btn = int(act.get("button", 1))
+                cm = bool(act.get("clearmodifiers", False))
+                win = act.get("window_id") or "$win_id"
+                cmd = f"xdotool mousedown{flag(cm, 'clearmodifiers')}"
+                if win:
+                    cmd += f" --window {win}"
+                cmd += f" {btn}"
+                lines.append(cmd)
+            elif atype == "mouseup":
+                btn = int(act.get("button", 1))
+                cm = bool(act.get("clearmodifiers", False))
+                win = act.get("window_id") or "$win_id"
+                cmd = f"xdotool mouseup{flag(cm, 'clearmodifiers')}"
+                if win:
+                    cmd += f" --window {win}"
+                cmd += f" {btn}"
+                lines.append(cmd)
+            elif atype == "get_location":
+                shell = bool(act.get("shell", False))
+                prefix = act.get("prefix")
+                cmd = "xdotool getmouselocation"
+                if shell:
+                    cmd += " --shell"
+                if prefix:
+                    pf = str(prefix).replace("'", "'\\''")
+                    cmd += f" --prefix '{pf}'"
+                lines.append(cmd)
+            else:
+                raise ValueError(f"Unsupported mouse action type: {atype}")
+
+        script = "\n".join(lines)
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(script, task_id)
+        return [TextContent(type="text", text=f"Exit code: {exit_code}\n\nOutput:\n{output}")]
     elif name == "potato_workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
