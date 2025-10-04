@@ -35,13 +35,18 @@ async def list_tools() -> list[Tool]:
     tools = [
         Tool(
             name="execute_command",
-            description="Execute a command in the sandboxed Ubuntu container",
+            description="Execute a command in the sandboxed Ubuntu container (supports optional timeout)",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
                         "description": "The bash command to execute in the container",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional time to wait for completion before prompting (default: 120 seconds). The process will continue running if the timeout elapses.",
+                        "default": 120
                     }
                 },
                 "required": ["command"],
@@ -140,6 +145,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         raise RuntimeError("Container manager not initialized")
 
     if name == "execute_command":
+        import threading
+        import time as _time
         command = arguments.get("command")
         if not command:
             raise ValueError("Command is required")
@@ -147,13 +154,41 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # Generate unique task ID
         task_id = str(uuid.uuid4())
 
-        # Execute the command
-        exit_code, output = container_manager.execute_command(command, task_id)
+        # Optional timeout for waiting on the command (defaults to 120s)
+        try:
+            timeout_s = int(arguments.get("timeout_seconds", 120))
+        except Exception:
+            timeout_s = 120
 
-        # Format response
-        response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
+        result_holder: dict[str, Any] = {}
 
-        return [TextContent(type="text", text=response)]
+        def _worker():
+            try:
+                code, out = container_manager.execute_command(command, task_id)
+                result_holder["exit_code"] = code
+                result_holder["output"] = out
+            except Exception as e:
+                result_holder["error"] = str(e)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=timeout_s)
+
+        if t.is_alive():
+            # Don't cancel; just inform the user and return
+            prompt = (
+                f"Command is still running after {timeout_s}s. Task ID: {task_id}.\n"
+                "The process continues in the container. If you want to keep waiting, call execute_command again "
+                "with a larger timeout_seconds. If you don't want to wait, you can proceed with other tasks."
+            )
+            return [TextContent(type="text", text=prompt)]
+        else:
+            if "error" in result_holder:
+                return [TextContent(type="text", text=f"Error: {result_holder['error']}")]
+            exit_code = result_holder.get("exit_code")
+            output = result_holder.get("output", "")
+            response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
+            return [TextContent(type="text", text=response)]
     
     elif name == "github_list_repositories":
         if not container_manager.is_github_available():
