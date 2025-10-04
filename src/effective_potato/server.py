@@ -22,7 +22,7 @@ container_manager: ContainerManager | None = None
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
-    return [
+    tools = [
         Tool(
             name="execute_command",
             description="Execute a command in the sandboxed Ubuntu container",
@@ -38,31 +38,108 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    
+    # Add GitHub tools if GitHub CLI is available
+    if container_manager and container_manager.is_github_available():
+        tools.extend([
+            Tool(
+                name="list_repositories",
+                description="List GitHub repositories for a user or the authenticated user",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "owner": {
+                            "type": "string",
+                            "description": "The username or organization to list repos for. If not provided, lists repos for the authenticated user.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of repositories to list (default: 30)",
+                            "default": 30,
+                        }
+                    },
+                },
+            ),
+            Tool(
+                name="clone_repository",
+                description="Clone a GitHub repository into the workspace directory",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "owner": {
+                            "type": "string",
+                            "description": "The repository owner (username or organization)",
+                        },
+                        "repo": {
+                            "type": "string",
+                            "description": "The repository name",
+                        }
+                    },
+                    "required": ["owner", "repo"],
+                },
+            ),
+        ])
+    
+    return tools
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
-    if name != "execute_command":
-        raise ValueError(f"Unknown tool: {name}")
-
     if not container_manager:
         raise RuntimeError("Container manager not initialized")
 
-    command = arguments.get("command")
-    if not command:
-        raise ValueError("Command is required")
+    if name == "execute_command":
+        command = arguments.get("command")
+        if not command:
+            raise ValueError("Command is required")
 
-    # Generate unique task ID
-    task_id = str(uuid.uuid4())
+        # Generate unique task ID
+        task_id = str(uuid.uuid4())
 
-    # Execute the command
-    exit_code, output = container_manager.execute_command(command, task_id)
+        # Execute the command
+        exit_code, output = container_manager.execute_command(command, task_id)
 
-    # Format response
-    response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
+        # Format response
+        response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
 
-    return [TextContent(type="text", text=response)]
+        return [TextContent(type="text", text=response)]
+    
+    elif name == "list_repositories":
+        if not container_manager.is_github_available():
+            raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
+        
+        owner = arguments.get("owner")
+        limit = arguments.get("limit", 30)
+        
+        # Execute the list repositories command
+        exit_code, output = container_manager.list_repositories(owner=owner, limit=limit)
+        
+        # Format response
+        response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
+        
+        return [TextContent(type="text", text=response)]
+    
+    elif name == "clone_repository":
+        if not container_manager.is_github_available():
+            raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
+        
+        owner = arguments.get("owner")
+        repo = arguments.get("repo")
+        
+        if not owner or not repo:
+            raise ValueError("Both 'owner' and 'repo' are required")
+        
+        # Execute the clone repository command
+        exit_code, output = container_manager.clone_repository(owner=owner, repo=repo)
+        
+        # Format response
+        response = f"Exit code: {exit_code}\n\nOutput:\n{output}"
+        
+        return [TextContent(type="text", text=response)]
+    
+    else:
+        raise ValueError(f"Unknown tool: {name}")
 
 
 def initialize_server() -> None:

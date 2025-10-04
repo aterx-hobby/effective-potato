@@ -17,6 +17,7 @@ The Docker container includes:
 - rustup (Rust toolchain)
 - xorg-dev, xserver-xorg-core
 - python3, python3-pip, python3-venv
+- gh (GitHub CLI)
 
 ## Installation
 
@@ -97,6 +98,52 @@ Execute a bash command in the sandboxed container.
 }
 ```
 
+#### list_repositories
+
+List GitHub repositories for a user or the authenticated user. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
+
+**Parameters:**
+- `owner` (string, optional): The username or organization to list repos for. If not provided, lists repos for the authenticated user.
+- `limit` (integer, optional): Maximum number of repositories to list (default: 30)
+
+**Returns:**
+- Exit code and list of repositories
+
+**Example:**
+```json
+{
+  "name": "list_repositories",
+  "arguments": {
+    "owner": "octocat",
+    "limit": 10
+  }
+}
+```
+
+#### clone_repository
+
+Clone a GitHub repository into the workspace directory. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
+
+**Parameters:**
+- `owner` (string, required): The repository owner (username or organization)
+- `repo` (string, required): The repository name
+
+**Returns:**
+- Exit code and output of the clone operation
+
+**Example:**
+```json
+{
+  "name": "clone_repository",
+  "arguments": {
+    "owner": "octocat",
+    "repo": "Hello-World"
+  }
+}
+```
+
+**Note:** The repository will be cloned into `/workspace/repo-name` in the container.
+
 ## Development
 
 ### Running Tests
@@ -160,6 +207,16 @@ The `local/.env` file is loaded and validated at startup. Environment variables 
 **Important:** The `.env` file must contain only environment variable assignments (e.g., `VAR=value`) and comments. Any other content will cause a validation error.
 
 If no `local/.env` file is present, a warning is printed on startup. See `local/sample.env` for the format.
+
+### GitHub CLI Integration
+
+To enable GitHub CLI tools (`list_repositories` and `clone_repository`), add your GitHub Personal Access Token to the `local/.env` file:
+
+```bash
+GITHUB_PERSONAL_ACCESS_TOKEN=your_token_here
+```
+
+The token will be used to authenticate the GitHub CLI when the container starts. Once authenticated, you can use the GitHub tools to list and clone repositories.
 
 ### How it works:
 
