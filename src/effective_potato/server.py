@@ -89,8 +89,8 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="list_local_repositories",
-            description="List repositories tracked in the workspace (.agent/track_repos.json) and whether their directories currently exist",
+            name="potato_workspace_list_repositories",
+            description="List repositories tracked in the locally deployed effective-potato workspace (.agent/track_repos.json) and whether their directories currently exist",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -110,14 +110,14 @@ async def list_tools() -> list[Tool]:
     if container_manager and container_manager.is_github_available():
         tools.extend([
             Tool(
-                name="list_repositories",
-                description="List GitHub repositories for a user or the authenticated user",
+                name="github_list_repositories",
+                description="List repositories available on github.com in owner/repo format, for a given owner or the authenticated user (public or accessible via SSH key/GH_TOKEN).",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "owner": {
                             "type": "string",
-                            "description": "The username or organization to list repos for. If not provided, lists repos for the authenticated user.",
+                            "description": "Username or organization to list repos for. If omitted, lists for the authenticated user.",
                         },
                         "limit": {
                             "type": "integer",
@@ -172,7 +172,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         return [TextContent(type="text", text=response)]
     
-    elif name == "list_repositories":
+    elif name in ("github_list_repositories", "list_repositories"):
         if not container_manager.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
         
@@ -288,7 +288,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 task_id = str(uuid.uuid4())
                 exit_code, output = container_manager.execute_command(command, task_id)
                 results.append({"index": idx, "type": stype, "exit_code": exit_code, "output": output})
-            elif stype == "list_repositories":
+            elif stype in ("github_list_repositories", "list_repositories"):
                 if not container_manager.is_github_available():
                     results.append({"index": idx, "type": stype, "error": "GitHub CLI is not available"})
                 else:
@@ -312,13 +312,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 filename = step.get("filename")
                 if not launch_command:
                     raise ValueError("launch_and_screenshot requires 'launch_command'")
-                shot_dir = "/workspace/.agent_screenshots"
+                shot_dir = "/workspace/.agent/screenshots"
                 import datetime as dt
                 ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
                 out_name = filename or f"screenshot_{ts}.png"
                 out_path = f"{shot_dir}/{out_name}"
                 cmd = (
-                    "mkdir -p /workspace/.agent_screenshots && "
+                    "mkdir -p /workspace/.agent/screenshots && "
                     f"({launch_command}) >/tmp/launch.log 2>&1 & "
                     f"sleep {delay}; "
                     "export DISPLAY=:0; "
@@ -360,18 +360,50 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         flush_low_level(buf, results)
 
         return [TextContent(type="text", text=json.dumps({"results": results}, ensure_ascii=False, indent=2))]
-    elif name == "list_local_repositories":
+    elif name in ("potato_workspace_list_repositories", "list_local_repositories"):
         import json
         items = container_manager.list_local_repositories()
         return [TextContent(type="text", text=json.dumps({"items": items}, ensure_ascii=False, indent=2))]
     elif name == "potato_get_toolset_schema":
         import json
+        import urllib.request
+        import urllib.error
         url = get_tool_schema_url()
-        message = (
-            "Use this OpenAPI schema URL to discover and understand the available tools. "
-            "The schema is intended for tool descriptions and parameters."
-        )
-        return [TextContent(type="text", text=json.dumps({"url": url, "note": message}, ensure_ascii=False, indent=2))]
+        payload: dict = {"url": url}
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = getattr(resp, "status", resp.getcode())
+                raw = resp.read()
+                # Best-effort charset detection
+                charset = None
+                try:
+                    charset = resp.headers.get_content_charset()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                text = raw.decode(charset or "utf-8", errors="replace")
+                try:
+                    schema_obj = json.loads(text)
+                    payload.update({
+                        "fetched": True,
+                        "status": int(status) if status is not None else None,
+                        "openapi": schema_obj,
+                        "note": "Fetched OpenAPI schema; use this content for tool descriptions.",
+                    })
+                except Exception:
+                    payload.update({
+                        "fetched": True,
+                        "status": int(status) if status is not None else None,
+                        "raw": text,
+                        "note": "Fetched schema but could not parse JSON; raw text included.",
+                    })
+        except urllib.error.URLError as e:
+            payload.update({
+                "fetched": False,
+                "error": str(e),
+                "note": "Schema URL unreachable; use the URL to retrieve the OpenAPI schema yourself.",
+            })
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))]
     
     else:
         raise ValueError(f"Unknown tool: {name}")
