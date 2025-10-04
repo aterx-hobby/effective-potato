@@ -59,7 +59,8 @@ async def list_tools() -> list[Tool]:
             name="launch_and_screenshot",
             description=(
                 "Self-contained: launches the process and captures a fullscreen screenshot via xfce4-screenshooter. "
-                "Do not pre-launch the app outside this tool; provide everything needed here."
+                "Do not pre-launch the app outside this tool; provide everything needed here. "
+                "Hint: when launching Python programs, activate the appropriate virtualenv as part of launch_command (e.g., 'source .venv/bin/activate && python app.py')."
             ),
             inputSchema={
                 "type": "object",
@@ -147,8 +148,26 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="potato_workspace_find",
             description=(
-                "Run a find command within the workspace (or a subdirectory), excluding .git and any directories "
-                "with names containing 'venv' or '_env' to avoid noisy results. Path must be workspace-relative."
+                "Context discovery: search the workspace (or a subdirectory) while excluding .git and directories "
+                "containing 'venv' or '_env' to avoid polluted results. Use this to find code and docs, not venvs. "
+                "Path should be workspace-relative; absolute paths starting with '/workspace' are accepted and normalized. "
+                "Optional filters: name (glob) and type (file/dir)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Optional workspace-relative path to search under (default: '.')"},
+                    "name": {"type": "string", "description": "Optional glob to match names (e.g., '*.py')"},
+                    "type": {"type": "string", "enum": ["any", "file", "dir"], "default": "any"}
+                }
+            },
+        ),
+        Tool(
+            name="potato_workspace_find_venvs",
+            description=(
+                "Locate Python virtual environments (venvs) within the workspace (or a subdirectory). "
+                "Looks for markers like 'pyvenv.cfg' or 'bin/activate'. Excludes .git, but DOES NOT exclude venv directories. "
+                "Use this when you specifically want to find venv roots."
             ),
             inputSchema={
                 "type": "object",
@@ -538,13 +557,67 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError("'path' must be a string if provided")
         # Prevent absolute paths or traversal; resolve within workspace via container-side cd
         # Build a safe command using bash to cd into /workspace and then into the relative path.
-        rel = str(subpath).lstrip("/")
-        # find with prune rules: skip .git, *venv*, *_env*
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+        # Options
+        name_pat = arguments.get("name")
+        ftype = (arguments.get("type") or "any").lower()
+        type_clause = ""
+        if ftype == "file":
+            type_clause = "-type f"
+        elif ftype == "dir":
+            type_clause = "-type d"
+        name_clause = ""
+        if isinstance(name_pat, str) and name_pat:
+            esc = name_pat.replace("'", "'\\''")
+            name_clause = f"-name '{esc}'"
+
+        # find with escaped parentheses for prune rules: skip .git, *venv*, *_env*
+        prune = "\\( -name .git -o -name '*venv*' -o -name '*_env*' \\) -prune"
+        # Combine filters for the non-pruned branch
+        filters = " ".join([c for c in [type_clause, name_clause] if c])
+        if filters:
+            filters = " " + filters
         find_cmd = (
             "cd /workspace && "
             f"cd -- '{rel.replace("'", "'\\''")}' && "
-            "find . -type d "
-            "( -name .git -o -name '*venv*' -o -name '*_env*' ) -prune -o -print"
+            f"find . -type d {prune} -o{filters} -print"
+        )
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(find_cmd, task_id)
+        return [TextContent(type="text", text=f"Exit code: {exit_code}\n\nOutput:\n{output}")]
+    elif name == "potato_workspace_find_venvs":
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+
+        # Search for common venv markers; exclude .git but do NOT exclude venv-like directories
+        # A venv root typically has either 'pyvenv.cfg' or 'bin/activate' present
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel.replace("'", "'\\''")}' && "
+            "find . -type d -name .git -prune -o "
+            "( -type f -name 'pyvenv.cfg' -o -path '*/bin/activate' ) -print"
         )
         task_id = str(uuid.uuid4())
         exit_code, output = container_manager.execute_command(find_cmd, task_id)
