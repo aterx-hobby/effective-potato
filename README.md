@@ -10,6 +10,10 @@ On start up of the application we'll rebuild the container and then start it
 We need to maintain a local "workspace" directory that is mounted read/write to the container so that we don't need
 to constantly copy files in and out.
 
+When the container is built the file local/.env should be included and appended to the default user .profile
+If no local/.env file is present, print a Warning message on startup indicating, no custom environment data is being copied
+and to see the local/sample.env on how to format a local/.env file
+
 Once we have the container build out working the next functional item to work on will be to run specific commands.
 
 Instead of attempting to run them via `docker exec $containerid$ -- /path/to/bin lots of arguments that could get messed up`
