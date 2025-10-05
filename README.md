@@ -116,6 +116,16 @@ The following tools validate their inputs with Pydantic models and expose JSON S
   - Inputs: { path: string (workspace-relative or /workspace/...), algorithm?: 'sha256' | 'md5' (default: 'sha256') }
   - Behavior: computes the file digest using standard utilities.
 
+Additionally:
+- workspace_find
+  - Inputs: {
+      path?: string (workspace-relative, default: '.'),
+      name?: string (glob passed to find -name),
+      type?: 'any'|'a'|'file'|'f'|'dir'|'d' (default: 'any')
+    }
+  - Behavior: prunes .git, *venv*, *_env* directories; applies optional name and type filters.
+  - Aliases: 'a' => any, 'f' => file (-type f), 'd' => dir (-type d).
+
 For an MCP client, you can inspect each tool’s JSON Schema from the `list_tools` response to validate arguments before calling.
 
 #### execute_command

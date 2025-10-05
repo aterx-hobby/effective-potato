@@ -199,7 +199,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "path": {"type": "string"},
                     "name": {"type": "string"},
-                    "type": {"type": "string", "enum": ["any", "file", "dir"], "default": "any"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["any", "a", "file", "f", "dir", "d"],
+                        "default": "any",
+                        "description": "Result filter: any|a (all entries), file|f (-type f), dir|d (-type d).",
+                    },
                 },
             },
         )
@@ -727,7 +732,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             rel = raw
         # Options
         name_pat = arguments.get("name")
-        ftype = (arguments.get("type") or "any").lower()
+        ftype_raw = (arguments.get("type") or "any").lower()
+        # Accept shorthand aliases
+        if ftype_raw in {"a"}:
+            ftype = "any"
+        elif ftype_raw in {"f"}:
+            ftype = "file"
+        elif ftype_raw in {"d"}:
+            ftype = "dir"
+        else:
+            ftype = ftype_raw
         type_clause = ""
         if ftype == "file":
             type_clause = "-type f"
