@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="effective-potato",
-    version="0.1.0",
+    version="0.2.0",
     description="MCP server for sandboxed Ubuntu container execution",
     author="Gavin Barnard",
     package_dir={"": "src"},
