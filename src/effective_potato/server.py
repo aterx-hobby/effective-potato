@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 class ScreenshotInput(BaseModel):
     filename: str | None = Field(default=None, description="Optional filename for the screenshot (png)")
     delay_seconds: int = Field(default=0, ge=0)
+    # Optional per-call timeout (seconds); default applied by server logic
+    # Not included in schema properties to keep the model small—MCP clients can still pass it.
 
 
 class PythonRunModuleInput(BaseModel):
@@ -62,6 +64,50 @@ class LaunchAndScreenshotInput(BaseModel):
 def _schema(model: type[BaseModel]) -> dict:
     # Pydantic v2 schema
     return model.model_json_schema()
+
+
+# ---------------------------
+# Exec helpers
+# ---------------------------
+def _exec_with_timeout(cmd: str, *, arguments: dict | None = None, extra_env: dict | None = None) -> tuple[bool, int | None, str]:
+    """Run a container command with a default timeout.
+
+    Returns (timed_out, exit_code, output). Default timeout is 120s unless
+    arguments contains a numeric 'timeout_seconds'. If timed out, exit_code will
+    be None and output may be empty.
+    """
+    timeout_s = 120
+    if isinstance(arguments, dict):
+        try:
+            timeout_s = int(arguments.get("timeout_seconds", 120))
+        except Exception:
+            timeout_s = 120
+
+    # Run in a worker thread so we can implement a join timeout
+    result: dict[str, Any] = {}
+
+    def _worker():
+        try:
+            try:
+                code, out = container_manager.execute_command(cmd, str(uuid.uuid4()), extra_env=extra_env)
+            except TypeError:
+                # Some test fakes do not accept extra_env
+                code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+            result["exit_code"] = code
+            result["output"] = out
+        except Exception as e:
+            result["error"] = str(e)
+
+    import threading as _th
+    t = _th.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        return True, None, ""
+    if "error" in result:
+        # Surface errors as exit_code=1 with message in output
+        return False, 1, result.get("error", "error")
+    return False, result.get("exit_code"), result.get("output", "")
 
 
 # Initialize the MCP server
@@ -117,7 +163,10 @@ async def list_tools() -> list[Tool]:
     tools.append(
         Tool(
             name="workspace_screenshot",
-            description="Capture a fullscreen screenshot and save it under the workspace .agent/screenshots directory.",
+            description=(
+                "Capture a fullscreen screenshot and save it under the workspace .agent/screenshots directory. "
+                "Do NOT launch or manage processes in a separate call immediately before this; use the combined launch tool or ensure the UI is ready. Default timeout: 120s (override with timeout_seconds)."
+            ),
             inputSchema=_schema(ScreenshotInput),
         )
     )
@@ -286,7 +335,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="workspace_interact_and_record",
             description=(
-                "Focus a window, send key inputs, and record frames to a webm."
+                "Focus a window, send key inputs, and record frames to a webm. Do NOT launch or manage the target process outside this tool call—doing so may hang the session. Default timeout: 120s (override with timeout_seconds)."
             ),
             inputSchema={
                 "type": "object",
@@ -481,7 +530,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"xfce4-screenshooter -f -s '{out_path}'"
         )
         task_id = str(uuid.uuid4())
-        exit_code, output = container_manager.execute_command(cmd, task_id)
+        # Execute with default timeout behavior (120s unless overridden)
+        timed_out, exit_code, output = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Screenshot still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if you need to wait longer for the desktop to settle before capture."}))]
         import json as _json
         resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output}
         if _public_host and _public_port:
@@ -621,7 +675,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"xfce4-screenshooter -f -s '{out_path}'"
         )
         task_id = str(uuid.uuid4())
-        exit_code, output = container_manager.execute_command(cmd, task_id)
+        timed_out, exit_code, output = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Launch and capture still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if the app needs longer to render before capture."}))]
         import json as _json
         resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output}
         if _public_host and _public_port:
@@ -781,7 +839,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"find . -type d {prune} -o{filters} -print"
         )
         task_id = str(uuid.uuid4())
-        exit_code, output = container_manager.execute_command(find_cmd, task_id)
+        timed_out, exit_code, output = _exec_with_timeout(find_cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Search still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for very large directories."}))]
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -811,7 +873,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "\\( -type d \\( -name '*venv*' -o -name '*_env*' \\) -o -path '*/bin/activate' \\) -print"
         )
         task_id = str(uuid.uuid4())
-        exit_code, output = container_manager.execute_command(find_cmd, task_id)
+        timed_out, exit_code, output = _exec_with_timeout(find_cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Find venvs still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for deep or large workspaces."}))]
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -840,7 +906,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"cd -- '{base_rel.replace("'", "'\\''")}' && "
             f"tar -czf '{arch_q}' {items_quoted}"
         )
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout.", "hint": "Use timeout_seconds when modules need longer to run."}))]
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "archive": f"/workspace/{base_rel}/{arch_name}", "output": out, "hint": "You can download or share the archive path as needed."}))]
@@ -862,7 +931,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "cd /workspace && "
             f"{bin_name} -- '{rel_q}' | awk '{{print $1}}'"
         )
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout.", "hint": "Use timeout_seconds for scripts that take longer."}))]
         digest = (out or "").strip().split()[0] if out else ""
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -884,7 +956,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         py = _norm(venv).rstrip("/") + "/bin/python"
         arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
         cmd = f"{py} -m {module} {arg_str}".rstrip()
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git add still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for repos with many files."}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} module={module}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
@@ -906,7 +982,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         sp = _norm(script_path)
         arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
         cmd = f"{py} '{sp}' {arg_str}".rstrip()
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git commit still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if pre-commit hooks are slow."}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
@@ -965,7 +1045,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"git add {path_args}"
         )
         import json as _json
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git push still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for slow networks or large pushes."}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, you can proceed to commit or push; otherwise surface the error succinctly."}))]
     elif name == "workspace_git_commit":
@@ -982,7 +1066,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"git commit{all_clause} -m '{msg}'"
         )
         import json as _json
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git pull still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for slow networks or large updates."}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If commit succeeded, summarize the commit message and next steps (push or create PR)."}))]
     elif name == "workspace_git_push":
@@ -1002,7 +1090,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"git push{upstream} '{remote_s}'{branch_clause}"
         )
         import json as _json
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "gh view still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if the GitHub API is slow."}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase."}))]
     elif name == "workspace_git_pull":
