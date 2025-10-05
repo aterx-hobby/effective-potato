@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "effective-potato"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for sandboxed Ubuntu container execution"
 authors = [{ name = "Gavin Barnard" }]
 requires-python = ">=3.8"
 dependencies = [
   "mcp>=1.0.0",
   "docker>=7.0.0",
+  "flask>=3.0.0",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

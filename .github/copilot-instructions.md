@@ -142,3 +142,27 @@ cp local/sample.env local/.env
    - Local workspace operations should start with `potato_workspace_*`.
    - Remote GitHub operations should start with `github_*`.
    - Do not add backward-compatibility aliases during development; update callers/tests instead.
+
+## Next Milestone Goals (update statuses here)
+
+Track progress here by setting Status to one of: not_started, in_progress, completed. Update as tasks move forward.
+
+1) P0 – Secrets + Task Lifecycle Controls
+- Goal: Stop writing secrets to script files; inject sensitive env via Docker exec environment. Add task lifecycle tools to poll/terminate long-running commands (status/kill by task_id), and ensure robust cleanup.
+- Status: not_started
+
+2) P1 – CI, Lint, Type-check, Observability Scaffold
+- Goal: Add GitHub Actions to run ruff, mypy, and pytest (unit by default; optional integration). Add structured logging with per-call request IDs and a basic /metrics endpoint in the Flask app.
+- Status: not_started
+
+3) P1 – Python Runner & Venv Selection + Screenshot Decoupling
+- Goal: Tools to detect/select venvs and run Python scripts/modules within a chosen venv. Provide a standalone screenshot tool to capture without re-launching apps.
+- Status: not_started
+
+4) P1 – Container Footprint and Optional GUI Layer
+- Goal: Reduce image size/build time via better caching and layering; make the GUI/X stack optionally installable or split into a separate layer/flag.
+- Status: not_started
+
+5) P2 – Typed Tool Schemas and Workspace Utilities
+- Goal: Define Pydantic models for tool inputs/outputs to auto-generate JSON Schemas. Add tar/zip/digest helpers and improve GUI robustness (window readiness checks, capture retries).
+- Status: not_started
