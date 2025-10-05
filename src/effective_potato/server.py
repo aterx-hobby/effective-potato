@@ -659,6 +659,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         frames_dir = f"/workspace/.agent/screenshots/{base}_frames"
         video_out = f"/workspace/.agent/screenshots/{base}.webm"
         pattern = window_title.replace("'", "'\\''")
+        # Common timing variables so both loops align
+        interval_int = max(1, interval)
+        interval_sleep = f"{interval_int//1000}.{(interval_int%1000):03d}"
         script_lines = [
             "set -e",
             f"mkdir -p '{frames_dir}'",
@@ -667,34 +670,45 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "test -n \"$win_id\" || { echo 'window not found' >&2; exit 1; }",
             # Focus window
             "xdotool windowactivate $win_id && xdotool windowfocus $win_id",
+            # Shared start/end for both loops
+            "start=$(date +%s%3N)",
+            f"end=$((start + {duration}*1000))",
             # Start background frame capture loop
-            "( \n"
-            "  idx=0; \n"
-            "  start=$(date +%s%3N); \n"
-            f"  end=$((start + {duration}*1000)); \n"
-            "  while [ $(date +%s%3N) -lt $end ]; do \n"
-            f"    xfce4-screenshooter -f -s '{frames_dir}/frame_$(printf %06d $idx).png' >/dev/null 2>&1; \n"
-            f"    idx=$((idx+1)); sleep {max(1, interval)//1000}.{(interval%1000):03d}; \n"
-            "  done \n"
-            ") & cap_pid=$!",
+            "( idx=0; while [ $(date +%s%3N) -lt $end ]; do "
+            f"    xfce4-screenshooter -f -s '{frames_dir}/frame_$(printf %06d $idx).png' >/dev/null 2>&1; "
+            f"    idx=$((idx+1)); sleep {interval_sleep}; "
+            "  done ) & cap_pid=$!",
         ]
 
-        # Append input sending as discrete key events with optional delays
+        # Build a single pass of input events; default delay 300ms when not provided
+        one_pass_cmds: list[str] = []
         for item in inputs:
+            if not isinstance(item, dict):
+                continue
             keys = item.get("keys")
-            delay_ms = int(item.get("delay_ms", 100)) if isinstance(item, dict) else 100
             if not keys:
                 continue
+            delay_ms = int(item.get("delay_ms", 300))
             esc_keys = str(keys)
-            script_lines.append(
+            one_pass_cmds.append(
                 f"xdotool key --clearmodifiers --delay {delay_ms} --repeat 0 --repeat-delay 0 --window $win_id {esc_keys} || true"
             )
 
-        # Wait for capture loop to finish, then compile frames into a webm using ffmpeg (libvpx-vp9)
+        # Loop the provided inputs continuously until end time
+        if one_pass_cmds:
+            loop_body = "; ".join(one_pass_cmds)
+            script_lines.append(
+                f"( while [ $(date +%s%3N) -lt $end ]; do {loop_body}; done ) & inp_pid=$!"
+            )
+        else:
+            script_lines.append("inp_pid=")
+
+        # Wait for capture loop, then stop input loop and compile frames into a video
         script_lines.extend([
             "wait $cap_pid || true",
+            "if [ -n \"$inp_pid\" ]; then kill $inp_pid 2>/dev/null || true; fi",
             f"ffmpeg -y -framerate $((1000/{max(1, interval)})) -pattern_type glob -i '{frames_dir}/frame_*.png' -c:v libvpx-vp9 -pix_fmt yuv420p '{video_out}' >/dev/null 2>&1 || true",
-            "echo OUTPUT_VIDEO:\n" + video_out,
+            f"echo 'OUTPUT_VIDEO: {video_out}'",
         ])
 
         full_script = "\n".join(script_lines)
@@ -709,8 +723,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Reuse screenshots route to serve the video file
             fname = f"{base}.webm"
             payload["video_url"] = _b(_public_host, int(_public_port), fname)
-        # UX hint: videos should be offered as playable content to the user
-        payload["hint"] = "If video_url is present, present a playable video to the user; otherwise provide a download link and describe where frames are saved."
+        # UX hint: videos should be offered as playable content to the user, include an example embed
+        payload["hint"] = (
+            "The user wants to watch the video. If video_url is present, embed a clickable link or player in the chat so it renders in the browser (e.g., Markdown: [▶️ Play]({video_url})). "
+            "Otherwise provide the local path and a short summary of the capture."
+        )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
         # Validate workspace-relative path
