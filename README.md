@@ -252,3 +252,54 @@ This ensures that all environment variables are available to every command execu
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 
+## OpenWeb Model Export
+
+To export the custom workspace model (e.g., "effective-potato") from your OpenWeb server, set these env vars in your shell (secrets are not written to disk):
+
+- DEV_OPENWEBAPI_URL (e.g., https://openweb.example.com)
+- DEV_OPENWEBAPI_KEY (secret)
+- DEV_OPENWEBAPI_SCHEMA (optional)
+
+Then run the helper script:
+
+```bash
+source venv/bin/activate
+export DEV_OPENWEBAPI_URL=...
+export DEV_OPENWEBAPI_KEY=...
+MODEL_NAME=effective-potato OUTPUT_DIR=./openweb_exports/effective-potato ./scripts/export_openweb_model.sh
+```
+
+The resulting artifact will be written under `openweb_exports/<model>/<timestamp>.<ext>` so it can be checked into this repository and redeployed on other OpenWeb servers.
+
+Note: These shell helpers are not exposed as MCP tools to avoid easy tampering; run them manually as needed.
+
+
+## OpenWeb One-shot Redeploy
+
+To redeploy a model end-to-end (export → import → register → publish) to another OpenWeb server:
+
+- DEV_OPENWEB_URL or DEV_OPENWEBAPI_URL
+- DEV_OPENWEB_KEY or DEV_OPENWEBAPI_KEY
+- MODEL_NAME: source model to export (unless MODEL_FILE provided)
+- NEW_MODEL_NAME: target model name on destination
+- MODEL_FILE: optional pre-existing export JSON (skip export stage)
+- DELETE_EXISTING=1: optionally replace existing target
+- SET_DEFAULT=1: optionally set as default in workspace
+- BASE_MODEL_ID, DESCRIPTION, ACTIVATE: optional overrides for UI registration
+
+Example:
+
+```bash
+source venv/bin/activate
+export DEV_OPENWEB_URL=https://openweb.example.com
+export DEV_OPENWEB_KEY=... # secret
+MODEL_NAME=effective-potato NEW_MODEL_NAME=silly-pertato SET_DEFAULT=1 \
+  ./scripts/redeploy_openweb_model.sh
+```
+
+Notes:
+- Secrets are injected at runtime and never written to disk.
+- The script is idempotent: if NEW_MODEL_NAME already exists and DELETE_EXISTING is not set, it will warn and keep the existing model.
+- UI visibility requires register/update to succeed; the script verifies presence before publishing into the workspace config.
+
+

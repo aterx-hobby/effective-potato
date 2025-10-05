@@ -513,7 +513,64 @@ class ContainerManager:
         """
         return bool(self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN"))
 
-    def execute_command(self, command: str, task_id: str) -> tuple[int, str]:
+    def _build_script_content(self, command: str) -> str:
+        """Build the bash script content for a command without embedding env secrets.
+
+        Only the raw command is included. Environment is injected at exec time via the
+        Docker exec environment to avoid persisting secrets to disk.
+
+        Args:
+            command: The bash command to execute in the container.
+
+        Returns:
+            Script content as a string.
+        """
+        lines: list[str] = ["#!/bin/bash", ""]
+        # Avoid exporting any env vars here; inject via exec_run(environment=...)
+        lines.append(f"{command}")
+        # Ensure a trailing newline
+        if not lines[-1].endswith("\n"):
+            lines[-1] = lines[-1] + "\n"
+        return "\n".join(lines)
+
+    def _compose_exec_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """Compose environment variables for container exec without persisting to disk.
+
+        - Starts with values loaded from local .env (self.env_vars)
+        - Fills common GitHub token aliases from any available token
+        - Ensures DISPLAY defaults to :0
+        - Merges any extra_env overrides
+        """
+        env: dict[str, str] = {}
+        # Start with loaded env (do not mutate self.env_vars)
+        for k, v in (self.env_vars or {}).items():
+            env[str(k)] = str(v)
+
+        # Ensure GitHub tokens are available under common names
+        token_from_any = (
+            self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN")
+            or self._env_get("GH_TOKEN")
+            or self._env_get("GITHUB_TOKEN")
+        )
+        if token_from_any:
+            # Respect explicit entries in local .env to avoid override
+            if "GITHUB_PERSONAL_ACCESS_TOKEN" not in env:
+                env["GITHUB_PERSONAL_ACCESS_TOKEN"] = token_from_any
+            if "GH_TOKEN" not in env:
+                env["GH_TOKEN"] = token_from_any
+            if "GITHUB_TOKEN" not in env:
+                env["GITHUB_TOKEN"] = token_from_any
+
+        # DISPLAY for X apps
+        env.setdefault("DISPLAY", ":0")
+
+        # Merge caller-provided extras last
+        if extra_env:
+            for k, v in extra_env.items():
+                env[str(k)] = str(v)
+        return env
+
+    def execute_command(self, command: str, task_id: str, *, extra_env: dict[str, str] | None = None) -> tuple[int, str]:
         """Execute a command in the container via a script file.
 
         Args:
@@ -526,46 +583,10 @@ class ContainerManager:
         if not self.container:
             raise RuntimeError("Container is not running")
 
-        # Create script file in workspace
+        # Create script file in workspace (no embedded env exports)
         script_dir = self.workspace_dir / ".agent" / "tmp_scripts"
         script_path = script_dir / f"task_{task_id}.sh"
-
-        # Build script content with environment variables prefixed
-        script_content = "#!/bin/bash\n\n"
-        
-        # Add environment variable exports at the beginning (from local/.env)
-        for var_name, var_value in self.env_vars.items():
-            # Escape single quotes in the value
-            escaped_value = var_value.replace("'", "'\\''")
-            script_content += f"export {var_name}='{escaped_value}'\n"
-        
-        # Ensure GitHub tokens are exported for downstream commands.
-        # Prefer a single source of truth token and map it to common env names.
-        token_from_any = (
-            self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN")
-            or self._env_get("GH_TOKEN")
-            or self._env_get("GITHUB_TOKEN")
-        )
-        if token_from_any:
-            escaped_token = token_from_any.replace("'", "'\\''")
-            # Export canonical PAT if not already provided in local .env
-            if "GITHUB_PERSONAL_ACCESS_TOKEN" not in self.env_vars:
-                script_content += f"export GITHUB_PERSONAL_ACCESS_TOKEN='{escaped_token}'\n"
-            # Also populate the commonly used aliases if not already provided
-            if "GH_TOKEN" not in self.env_vars:
-                script_content += f"export GH_TOKEN='{escaped_token}'\n"
-            if "GITHUB_TOKEN" not in self.env_vars:
-                script_content += f"export GITHUB_TOKEN='{escaped_token}'\n"
-
-        if self.env_vars or token_from_any:
-            script_content += "\n"
-        
-        # Ensure DISPLAY is set for X apps
-        if "DISPLAY" not in self.env_vars:
-            script_content += "export DISPLAY=:0\n"
-        # Add the actual command
-        script_content += f"{command}\n"
-        
+        script_content = self._build_script_content(command)
         script_path.write_text(script_content)
 
         # Make it executable
@@ -573,10 +594,14 @@ class ContainerManager:
 
         # Execute the script in the container
         container_script_path = f"/workspace/.agent/tmp_scripts/task_{task_id}.sh"
+        # Compose ephemeral environment for this exec
+        exec_env = self._compose_exec_env(extra_env)
+
         exec_result = self.container.exec_run(
             cmd=["bash", "-lc", container_script_path],
             demux=True,
             user="ubuntu",
+            environment=exec_env,
         )
 
         exit_code = exec_result.exit_code
@@ -598,6 +623,106 @@ class ContainerManager:
             logger.warning(f"Failed to clean up script {script_path}: {e}")
 
         return exit_code, output
+
+    # ---------------------------
+    # Task lifecycle (background)
+    # ---------------------------
+    def start_background_task(
+        self,
+        command: str,
+        task_id: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> dict:
+        """Start a long-running command in the background inside the container.
+
+        Writes a script file (without secrets), launches it detached, and records pid/code/out files
+        under /workspace/.agent/tmp_scripts.
+
+        Returns a dict with task_id.
+        """
+        if not self.container:
+            raise RuntimeError("Container is not running")
+
+        script_dir = self.workspace_dir / ".agent" / "tmp_scripts"
+        script_path = script_dir / f"task_{task_id}.sh"
+        script_path.write_text(self._build_script_content(command))
+        script_path.chmod(0o755)
+
+        container_script = f"/workspace/.agent/tmp_scripts/task_{task_id}.sh"
+        container_out = f"/workspace/.agent/tmp_scripts/task_{task_id}.out"
+        container_pid = f"/workspace/.agent/tmp_scripts/task_{task_id}.pid"
+        container_code = f"/workspace/.agent/tmp_scripts/task_{task_id}.code"
+
+        # Launch detached: run script, capture exit code, redirect all output, store pid
+        launch = (
+            "( bash '" + container_script + "' ; echo $? > '" + container_code + "' ) "
+            "> '" + container_out + "' 2>&1 & echo $! > '" + container_pid + "'"
+        )
+
+        exec_env = self._compose_exec_env(extra_env)
+        res = self.container.exec_run(
+            cmd=["bash", "-lc", launch],
+            demux=True,
+            user="ubuntu",
+            environment=exec_env,
+        )
+        # We don't require success here; the actual task may still start even if wrapper returns non-zero
+        return {"task_id": task_id, "exit_code": getattr(res, "exit_code", None)}
+
+    def get_task_status(self, task_id: str) -> dict:
+        """Return background task status using container pid/code files.
+
+        Response keys: running (bool), exit_code (int|None), has_output (bool)
+        """
+        if not self.container:
+            raise RuntimeError("Container is not running")
+        pid_p = f"/workspace/.agent/tmp_scripts/task_{task_id}.pid"
+        code_p = f"/workspace/.agent/tmp_scripts/task_{task_id}.code"
+        out_p = f"/workspace/.agent/tmp_scripts/task_{task_id}.out"
+        probe = (
+            "state=missing; ec=""; "
+            f"if [ -f '{pid_p}' ]; then pid=$(cat '{pid_p}' 2>/dev/null); "
+            "if [ -n \"$pid\" ] && kill -0 $pid 2>/dev/null; then state=running; else state=exited; fi; "
+            f"fi; if [ -f '{code_p}' ]; then ec=$(cat '{code_p}' 2>/dev/null); fi; "
+            "echo STATE:$state; echo EXIT:$ec; "
+            f"test -f '{out_p}' && echo OUT:1 || echo OUT:0"
+        )
+        res = self.container.exec_run(cmd=["bash", "-lc", probe], demux=True, user="ubuntu")
+        text = ""
+        if res and res.output:
+            stdout, stderr = res.output
+            if stdout:
+                text += stdout.decode("utf-8", errors="replace")
+            if stderr:
+                text += stderr.decode("utf-8", errors="replace")
+        running = False
+        exit_code: int | None = None
+        has_output = False
+        for line in text.splitlines():
+            if line.startswith("STATE:"):
+                running = (line.split(":", 1)[1].strip() == "running")
+            elif line.startswith("EXIT:"):
+                val = line.split(":", 1)[1].strip()
+                if val != "":
+                    try:
+                        exit_code = int(val)
+                    except ValueError:
+                        exit_code = None
+            elif line.startswith("OUT:"):
+                has_output = line.split(":", 1)[1].strip() == "1"
+        return {"task_id": task_id, "running": running, "exit_code": exit_code, "has_output": has_output}
+
+    def kill_task(self, task_id: str, *, signal: str = "TERM") -> dict:
+        """Attempt to terminate a background task by signal."""
+        if not self.container:
+            raise RuntimeError("Container is not running")
+        pid_p = f"/workspace/.agent/tmp_scripts/task_{task_id}.pid"
+        sig = signal or "TERM"
+        cmd = f"bash -lc \"if [ -f '{pid_p}' ]; then pid=\$(cat '{pid_p}' 2>/dev/null); kill -s {sig} \$pid 2>/dev/null || true; fi\""
+        res = self.container.exec_run(cmd=["bash", "-c", cmd], demux=True, user="ubuntu")
+        ok = getattr(res, "exit_code", 1) == 0
+        return {"task_id": task_id, "signaled": sig, "ok": ok}
 
     def list_repositories(self, owner: str | None = None, limit: int = 30) -> tuple[int, str]:
         """List GitHub repositories.
@@ -887,11 +1012,7 @@ class ContainerManager:
 
         task_id = f"pipeline_{uuid.uuid4()}"
         script_lines: list[str] = []
-        if extra_env:
-            for k, v in extra_env.items():
-                ek = str(k)
-                ev = str(v).replace("'", "'\\''")
-                script_lines.append(f"export {ek}='{ev}'")
+        # Do not export extra_env into the script to avoid persisting secrets; inject via exec env
         base_cwd = "/workspace"
         if working_dir:
             self._resolve_workspace_path(working_dir).mkdir(parents=True, exist_ok=True)
@@ -927,7 +1048,7 @@ class ContainerManager:
         overall_exit = 0
         if any((d.get("type") in ("exec", "run", "command")) for d in step_map.values()):
             composite_cmd = "\n".join(script_lines)
-            overall_exit, exec_output = self.execute_command(composite_cmd, task_id)
+            overall_exit, exec_output = self.execute_command(composite_cmd, task_id, extra_env=extra_env)
 
         results: list[dict] = []
         pre_by_index = {r["index"]: r for r in pre_results}

@@ -50,6 +50,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional time to wait before returning (default: 120). Process keeps running.",
                         "default": 120,
                     },
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
                 "required": ["command"],
             },
@@ -76,6 +77,46 @@ async def list_tools() -> list[Tool]:
             },
         )
     )
+
+    # Task lifecycle controls
+    tools.append(
+        Tool(
+            name="workspace_task_start",
+            description="Start a long-running command in the background and get a task_id",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                },
+                "required": ["command"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_task_status",
+            description="Poll task status by task_id",
+            inputSchema={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_task_kill",
+            description="Terminate a task by task_id with a signal (default TERM)",
+            inputSchema={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}, "signal": {"type": "string", "default": "TERM"}},
+                "required": ["task_id"],
+            },
+        )
+    )
+
+    # Note: OpenWeb scripts are intentionally NOT exposed as MCP tools to avoid easy tampering.
 
     # Workspace: list tracked repos
     tools.append(
@@ -277,9 +318,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         result_holder: dict[str, Any] = {}
 
+        env_map = arguments.get("env") or {}
+
         def _worker():
             try:
-                code, out = container_manager.execute_command(command, task_id)
+                code, out = container_manager.execute_command(command, task_id, extra_env=env_map)
                 result_holder["exit_code"] = code
                 result_holder["output"] = out
             except Exception as e:
@@ -307,6 +350,34 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             exit_code = result_holder.get("exit_code")
             output = result_holder.get("output", "")
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
+    elif name == "workspace_task_start":
+        command = arguments.get("command")
+        if not command:
+            raise ValueError("'command' is required")
+        env_map = arguments.get("env") or {}
+        task_id = str(uuid.uuid4())
+        info = container_manager.start_background_task(command, task_id, extra_env=env_map)
+        import json as _json
+        payload = {"task_id": task_id, **info, "hint": "Use workspace_task_status to poll and workspace_task_kill to terminate if needed."}
+        return [TextContent(type="text", text=_json.dumps(payload))]
+    elif name == "workspace_task_status":
+        task_id = arguments.get("task_id")
+        if not task_id:
+            raise ValueError("'task_id' is required")
+        status = container_manager.get_task_status(task_id)
+        import json as _json
+        status["hint"] = "If running=true, you can continue polling. When exit_code is not None, fetch logs from the path you used in the command or design the command to emit artifacts."
+        return [TextContent(type="text", text=_json.dumps(status))]
+    elif name == "workspace_task_kill":
+        task_id = arguments.get("task_id")
+        sig = arguments.get("signal", "TERM")
+        if not task_id:
+            raise ValueError("'task_id' is required")
+        result = container_manager.kill_task(task_id, signal=sig)
+        import json as _json
+        result["hint"] = "If the task doesn't stop, try signal=KILL. Then poll status again."
+        return [TextContent(type="text", text=_json.dumps(result))]
+    
     
     elif name == "github_clone_repository":
         if not container_manager.is_github_available():
@@ -679,7 +750,7 @@ def initialize_server() -> None:
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
     )
 
     logger.info("Initializing effective-potato MCP server...")

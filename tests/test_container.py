@@ -264,44 +264,32 @@ def test_container_manager_invalid_env_file_raises_error():
             )
 
 
-def test_execute_command_includes_env_vars(temp_workspace, temp_env_files):
-    """Test that execute_command includes environment variables in script."""
+def test_script_content_does_not_include_env_exports():
+    """Scripts should not persist env vars; they are injected at exec time."""
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir) / "workspace"
         workspace.mkdir()
-        
+
         env_file = Path(tmpdir) / ".env"
         env_file.write_text("TEST_VAR=test_value\n")
-        
+
         sample_env = Path(tmpdir) / "sample.env"
         sample_env.write_text("# Sample\n")
-        
+
         manager = ContainerManager(
             workspace_dir=str(workspace),
             env_file=str(env_file),
             sample_env_file=str(sample_env),
         )
-        
-        # Manually create a script to verify the content
-        task_id = "test_env"
-        script_dir = workspace / ".agent" / "tmp_scripts"
-        script_dir.mkdir(parents=True, exist_ok=True)
-        script_path = script_dir / f"task_{task_id}.sh"
-        
-        # Build script content with environment variables prefixed
-        script_content = "#!/bin/bash\n\n"
-        for var_name, var_value in manager.env_vars.items():
-            escaped_value = var_value.replace("'", "'\\''")
-            script_content += f"export {var_name}='{escaped_value}'\n"
-        if manager.env_vars:
-            script_content += "\n"
-        script_content += "echo 'test command'\n"
-        
-        script_path.write_text(script_content)
-        
-        content = script_path.read_text()
-        assert "export TEST_VAR='test_value'" in content
-        assert "echo 'test command'" in content
+
+        content = manager._build_script_content("echo 'hello'")
+        assert "export TEST_VAR" not in content
+        assert content.startswith("#!/bin/bash\n")
+        assert "echo 'hello'" in content
+
+        # Env should be present in composed exec environment instead
+        env = manager._compose_exec_env()
+        assert env.get("TEST_VAR") == "test_value"
 
 
 def test_is_github_available_without_token(temp_workspace, temp_env_files):

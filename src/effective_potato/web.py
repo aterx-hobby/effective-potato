@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import logging
-from flask import Flask, send_from_directory, abort
+from flask import Flask, send_from_directory, abort, request
 from werkzeug.serving import make_server
 from urllib.parse import quote
 
@@ -135,6 +135,15 @@ def create_app(workspace_dir: Path) -> Flask:
     @app.get("/healthz")
     def healthz():  # type: ignore[no-redef]
         return {"status": "ok"}, 200
+
+    # Minimal metrics endpoint (placeholder)
+    @app.get("/metrics")
+    def metrics():  # type: ignore[no-redef]
+        # Very basic counters; extend later with real metrics
+        return (
+            "effective_potato_up 1\n"
+            "effective_potato_requests_total 0\n"
+        ), 200, {"Content-Type": "text/plain; version=0.0.4"}
 
     @app.get("/screenshots/<path:filename>")
     def serve_screenshot(filename: str):  # type: ignore[no-redef]
