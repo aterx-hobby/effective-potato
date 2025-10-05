@@ -297,15 +297,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "task_id": task_id,
                 "timeout_seconds": timeout_s,
                 "message": "Command still running; call again with a larger timeout to wait longer.",
+                "hint": "If you need the final output, call this tool again with a larger timeout or poll until running=false.",
             }
             return [TextContent(type="text", text=_json.dumps(payload))]
         else:
             import json as _json
             if "error" in result_holder:
-                return [TextContent(type="text", text=_json.dumps({"exit_code": 1, "error": result_holder["error"]}))]
+                return [TextContent(type="text", text=_json.dumps({"exit_code": 1, "error": result_holder["error"], "hint": "Check the error field and adjust the command or environment; re-run if needed."}))]
             exit_code = result_holder.get("exit_code")
             output = result_holder.get("output", "")
-            return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
     
     elif name == "github_clone_repository":
         if not container_manager.is_github_available():
@@ -320,7 +321,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # Execute the clone repository command
         exit_code, output = container_manager.clone_repository(owner=owner, repo=repo)
         import json as _json
-        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "If cloning succeeded, add the repo to your workspace context and consider listing files or opening README next."}))]
     
     elif name == "workspace_launch_and_screenshot":
         launch_command = arguments.get("launch_command")
@@ -374,6 +375,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             fname = out_name
             url = build_screenshot_url(_public_host, int(_public_port), fname)
             resp["screenshot_url"] = url
+        # Always include a UX hint: screenshots should be displayed to the user
+        resp["hint"] = (
+            "Always display the screenshot to the user in the chat. "
+            "If screenshot_url is present, render it inline (e.g., Markdown: ![screenshot]({screenshot_url})). "
+            "If no URL, show the local path and offer to open it."
+        )
         return [TextContent(type="text", text=_json.dumps(resp))]
     
     elif name == "potato_workspace_multi_tool_pipeline":
@@ -448,6 +455,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Reuse screenshots route to serve the video file
             fname = f"{base}.webm"
             payload["video_url"] = _b(_public_host, int(_public_port), fname)
+        # UX hint: videos should be offered as playable content to the user
+        payload["hint"] = "If video_url is present, present a playable video to the user; otherwise provide a download link and describe where frames are saved."
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
         # Validate workspace-relative path
@@ -495,7 +504,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         exit_code, output = container_manager.execute_command(find_cmd, task_id)
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
-        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": "Use these paths for follow-up file reads or summaries; do not print long lists verbatim unless helpful."}))]
     elif name == "workspace_find_venvs":
         subpath = arguments.get("path") or "."
         if not isinstance(subpath, str):
@@ -512,35 +521,42 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         else:
             rel = raw
 
-        # Search for common venv markers; exclude .git but do NOT exclude venv-like directories
-        # A venv root typically has either 'pyvenv.cfg' or 'bin/activate' present
+            # Search for venv roots: directories named like *venv* or *_env*, or subfolders containing bin/activate.
+            # Exclude .git but do NOT exclude venv-like directories.
         find_cmd = (
             "cd /workspace && "
             f"cd -- '{rel.replace("'", "'\\''")}' && "
-            "find . -type d -name .git -prune -o "
-            "( -type f -name 'pyvenv.cfg' -o -path '*/bin/activate' ) -print"
+                "find . -type d -name .git -prune -o "
+                "\\( -type d \\( -name '*venv*' -o -name '*_env*' \\) -o -path '*/bin/activate' \\) -print"
         )
         task_id = str(uuid.uuid4())
         exit_code, output = container_manager.execute_command(find_cmd, task_id)
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
-        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": "Use these virtualenv roots to set up Python execution contexts or to activate environments before running code."}))]
     elif name == "workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
-        return [TextContent(type="text", text=json.dumps({"items": items}, ensure_ascii=False))]
+        return [TextContent(type="text", text=json.dumps({"items": items, "hint": "Use these repository entries to navigate or run git operations; avoid dumping full repo trees inline."}, ensure_ascii=False))]
     elif name == "workspace_read_file":
         rel = arguments.get("path")
         binary = bool(arguments.get("binary", False))
         if not rel:
             raise ValueError("'path' is required")
+        # Normalize absolute /workspace paths to relative
+        if isinstance(rel, str):
+            raw = rel.strip()
+            if raw == "/workspace":
+                rel = "."
+            elif raw.startswith("/workspace/"):
+                rel = raw[len("/workspace/"):]
         data = container_manager.read_workspace_file(rel, binary=binary)
         if binary:
             import json as _json
-            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data)}))]
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data), "hint": "This is binary content; offer a download or summarize, do not inline raw bytes."}))]
         else:
             import json as _json
-            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data)}))]
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data), "hint": "Summarize long files; for short text, show key excerpts. Avoid flooding chat with large content."}))]
     elif name == "workspace_write_file":
         rel = arguments.get("path")
         content = arguments.get("content")
@@ -548,9 +564,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         executable = bool(arguments.get("executable", False))
         if not rel or content is None:
             raise ValueError("'path' and 'content' are required")
+        # Normalize absolute /workspace paths to relative
+        if isinstance(rel, str):
+            raw = rel.strip()
+            if raw == "/workspace":
+                rel = "."
+            elif raw.startswith("/workspace/"):
+                rel = raw[len("/workspace/"):]
         import json as _json
         p = container_manager.write_workspace_file(rel, str(content), append=append, executable=executable)
-        return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable}))]
+        return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable, "hint": "Proceed with next action that uses this file (e.g., run it, open it, or commit it) rather than echoing the entire content."}))]
     elif name == "workspace_git_add":
         repo_path = arguments.get("repo_path")
         paths = arguments.get("paths") or []
@@ -564,7 +587,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, you can proceed to commit or push; otherwise surface the error succinctly."}))]
     elif name == "workspace_git_commit":
         repo_path = arguments.get("repo_path")
         message = arguments.get("message")
@@ -580,7 +603,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If commit succeeded, summarize the commit message and next steps (push or create PR)."}))]
     elif name == "workspace_git_push":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
@@ -599,7 +622,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase."}))]
     elif name == "workspace_git_pull":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
@@ -618,7 +641,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If pull succeeded, summarize changes. If conflicts, advise resolving and committing."}))]
     elif name == "github_get_repository":
         if not container_manager.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
@@ -642,6 +665,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload["repository"] = parsed
         else:
             payload["output"] = out
+        payload["hint"] = "Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely."
         return [TextContent(type="text", text=_json.dumps(payload))]
     
     else:
