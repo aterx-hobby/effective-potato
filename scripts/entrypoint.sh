@@ -2,27 +2,30 @@
 set -euo pipefail
 
 export DISPLAY=${DISPLAY:-:0}
+POTATO_GUI=${POTATO_GUI:-auto}
 
 # If no command provided, default to infinite sleep
 if [ "$#" -eq 0 ]; then
   set -- sleep infinity
 fi
 
-# Start supervisord (manages X server)
-/usr/bin/supervisord -c /etc/supervisor/supervisord.conf &
+# Optionally start GUI/X stack unless disabled
+if [ "$POTATO_GUI" = "1" ] || [ "$POTATO_GUI" = "true" ] || { [ "$POTATO_GUI" = "auto" ] && command -v supervisord >/dev/null 2>&1; }; then
+  /usr/bin/supervisord -c /etc/supervisor/supervisord.conf &
 
-# Wait for X socket to be ready (up to 20s)
-for i in $(seq 1 40); do
-  if [ -S "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
-    break
+  # Wait for X socket to be ready (up to 20s)
+  for i in $(seq 1 40); do
+    if [ -S "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  # Allow ubuntu user to access DISPLAY
+  if command -v xhost >/dev/null 2>&1; then
+    xhost +SI:localuser:ubuntu || true
+    xhost +local: || true
   fi
-  sleep 0.5
-done
-
-# Allow ubuntu user to access DISPLAY
-if command -v xhost >/dev/null 2>&1; then
-  xhost +SI:localuser:ubuntu || true
-  xhost +local: || true
 fi
 
 # Ensure ubuntu user exists and owns workspace

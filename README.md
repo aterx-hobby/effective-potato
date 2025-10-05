@@ -78,6 +78,46 @@ An example configuration file is provided in `mcp-config.json`.
 
 ### Available Tools
 
+### Typed tool inputs (schemas)
+
+The following tools validate their inputs with Pydantic models and expose JSON Schemas via `list_tools`:
+
+- workspace_screenshot
+  - Inputs: { filename?: string, delay_seconds?: integer >= 0 }
+  - Behavior: captures a fullscreen PNG into `/workspace/.agent/screenshots/<name>.png`. When the HTTP server is active, a `screenshot_url` is included for inline rendering.
+
+- workspace_launch_and_screenshot
+  - Inputs: {
+      launch_command: string (required),
+      delay_seconds?: integer >= 0 (default: 2),
+      filename?: string,
+      working_dir?: string (workspace-relative),
+      env?: { [key: string]: string }
+    }
+  - Behavior: launches the app, waits, and captures a fullscreen PNG.
+
+- workspace_python_run_module
+  - Inputs: { venv_path: string (workspace-relative), module: string, args?: string[] }
+  - Behavior: runs `python -m <module>` using `<venv_path>/bin/python` without activating the venv.
+
+- workspace_python_run_script
+  - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[] }
+  - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv.
+
+- workspace_tar_create
+  - Inputs: {
+      base_dir?: string (default: '.' workspace-relative),
+      items: string[] (files/dirs relative to base_dir),
+      archive_name?: string (default: `archive_<timestamp>.tar.gz`)
+    }
+  - Behavior: creates `base_dir/<archive_name>` as a `.tar.gz` from listed items.
+
+- workspace_file_digest
+  - Inputs: { path: string (workspace-relative or /workspace/...), algorithm?: 'sha256' | 'md5' (default: 'sha256') }
+  - Behavior: computes the file digest using standard utilities.
+
+For an MCP client, you can inspect each tool’s JSON Schema from the `list_tools` response to validate arguments before calling.
+
 #### execute_command
 
 Execute a bash command in the sandboxed container.
@@ -208,6 +248,22 @@ And executes it as:
 ```bash
 docker exec $containerid$ /workspace/.agent/tmp_scripts/task_$taskid$.sh
 ```
+
+### Observability: Metrics
+
+When the server is running, a lightweight metrics endpoint is exposed:
+
+```
+GET http://<host>:<port>/metrics
+```
+
+It returns text (Prometheus exposition style) with:
+- effective_potato_up: process up flag (1/0)
+- effective_potato_requests_total: total tool requests processed
+- effective_potato_tool_calls_total{tool="<name>"}: per-tool call counts
+- effective_potato_tool_duration_ms_sum{tool="<name>"}: cumulative per-tool elapsed time (ms)
+
+You can scrape this endpoint or just curl it for quick inspection during development.
 
 ## Environment Configuration
 

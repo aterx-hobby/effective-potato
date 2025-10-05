@@ -1,36 +1,42 @@
 FROM ubuntu:24.04
 
+ARG INSTALL_GUI=1
+# Note: INSTALL_GUI defaults to 1 (enabled). Pass --build-arg INSTALL_GUI=0 to produce a headless image.
+
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Update and install required base packages
+# Update and install required base packages (minimal set always)
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    snapd \
-    golang-1.23 \
-    xorg-dev \
-    xserver-xorg-core \
-    xserver-xorg-video-fbdev \
-    xvfb \
-    x11-utils \
-    x11-xserver-utils \
-    supervisor \
-    xfce4 \
-    xfce4-screenshooter \
-    ffmpeg \
-    dbus-x11 \
-    xdotool \
-    tree \
-    coreutils \
-    sed \
-    gawk \
-    grep \
-    findutils \
-    procps \
-    python3 \
-    python3-pip \
-    python3-venv \
-    curl \
-    gpg \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+        build-essential \
+        snapd \
+        golang-1.23 \
+        tree \
+        coreutils \
+        sed \
+        gawk \
+        grep \
+        findutils \
+        procps \
+        python3 \
+        python3-pip \
+        python3-venv \
+        curl \
+        gpg \
+        && if [ "$INSTALL_GUI" = "1" ]; then \
+                 apt-get install -y \
+                     xorg-dev \
+                     xserver-xorg-core \
+                     xserver-xorg-video-fbdev \
+                     xvfb \
+                     x11-utils \
+                     x11-xserver-utils \
+                     supervisor \
+                     xfce4 \
+                     xfce4-screenshooter \
+                     ffmpeg \
+                     dbus-x11 \
+                     xdotool \
+                 ; fi \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/*

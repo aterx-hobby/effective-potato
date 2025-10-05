@@ -68,6 +68,7 @@ effective-potato is an MCP (Model Context Protocol) server that provides callabl
 - Runs `sleep infinity` to stay alive
 - Rebuilds on application startup
 - Workspace directory mounted as read/write volume
+ - GUI/X stack is ENABLED by default. To build a headless image, pass `--build-arg INSTALL_GUI=0`. At runtime, you can disable GUI startup with `-e POTATO_GUI=0`.
 
 ## Command Execution Pattern
 
@@ -149,19 +150,19 @@ Track progress here by setting Status to one of: not_started, in_progress, compl
 
 1) P0 – Secrets + Task Lifecycle Controls
 - Goal: Stop writing secrets to script files; inject sensitive env via Docker exec environment. Add task lifecycle tools to poll/terminate long-running commands (status/kill by task_id), and ensure robust cleanup.
-- Status: not_started
+- Status: completed
 
 2) P1 – CI, Lint, Type-check, Observability Scaffold
 - Goal: Add GitHub Actions to run ruff, mypy, and pytest (unit by default; optional integration). Add structured logging with per-call request IDs and a basic /metrics endpoint in the Flask app.
-- Status: not_started
+- Status: completed
 
 3) P1 – Python Runner & Venv Selection + Screenshot Decoupling
 - Goal: Tools to detect/select venvs and run Python scripts/modules within a chosen venv. Provide a standalone screenshot tool to capture without re-launching apps.
-- Status: not_started
+- Status: completed
 
 4) P1 – Container Footprint and Optional GUI Layer
 - Goal: Reduce image size/build time via better caching and layering; make the GUI/X stack optionally installable or split into a separate layer/flag.
-- Status: not_started
+- Status: completed
 
 5) P2 – Typed Tool Schemas and Workspace Utilities
 - Goal: Define Pydantic models for tool inputs/outputs to auto-generate JSON Schemas. Add tar/zip/digest helpers and improve GUI robustness (window readiness checks, capture retries).

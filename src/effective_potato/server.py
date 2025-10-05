@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from pydantic import AnyUrl
+from pydantic import BaseModel, Field
 
 from .container import ContainerManager
 from .web import (
@@ -14,9 +15,53 @@ from .web import (
     get_server_config,
     build_screenshot_url,
     get_tool_schema_url,
+    record_tool_metric,
 )
 
 logger = logging.getLogger(__name__)
+# ---------------------------
+# Pydantic models (typed schemas)
+# ---------------------------
+
+class ScreenshotInput(BaseModel):
+    filename: str | None = Field(default=None, description="Optional filename for the screenshot (png)")
+    delay_seconds: int = Field(default=0, ge=0)
+
+
+class PythonRunModuleInput(BaseModel):
+    venv_path: str = Field(description="Workspace-relative path to the venv root")
+    module: str = Field(description="Python module name to run")
+    args: list[str] = Field(default_factory=list)
+
+
+class PythonRunScriptInput(BaseModel):
+    venv_path: str = Field(description="Workspace-relative path to the venv root")
+    script_path: str = Field(description="Workspace-relative path to the script")
+    args: list[str] = Field(default_factory=list)
+
+
+class TarCreateInput(BaseModel):
+    base_dir: str = Field(default=".", description="Workspace-relative directory to run tar from")
+    items: list[str] = Field(description="Relative paths (files/dirs) to include in archive")
+    archive_name: str | None = Field(default=None, description="Optional archive name (defaults to timestamped)")
+
+
+class DigestInput(BaseModel):
+    path: str = Field(description="Workspace-relative path to file to hash")
+    algorithm: str = Field(default="sha256", description="Hash algorithm: sha256 or md5")
+
+
+class LaunchAndScreenshotInput(BaseModel):
+    launch_command: str = Field(description="Command to launch (e.g., 'xclock')")
+    delay_seconds: int = Field(default=2, ge=0)
+    filename: str | None = Field(default=None)
+    working_dir: str | None = Field(default=None, description="Workspace-relative directory to cd into")
+    env: dict[str, str] | None = Field(default=None)
+
+
+def _schema(model: type[BaseModel]) -> dict:
+    # Pydantic v2 schema
+    return model.model_json_schema()
 
 
 # Initialize the MCP server
@@ -64,17 +109,16 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Launch an app and then capture a fullscreen screenshot."
             ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "launch_command": {"type": "string", "description": "Command to launch (e.g., 'xclock')"},
-                    "delay_seconds": {"type": "integer", "default": 2},
-                    "filename": {"type": "string"},
-                    "working_dir": {"type": "string", "description": "Workspace-relative directory to cd into"},
-                    "env": {"type": "object", "additionalProperties": {"type": "string"}},
-                },
-                "required": ["launch_command"],
-            },
+            inputSchema=_schema(LaunchAndScreenshotInput),
+        )
+    )
+
+    # Workspace: screenshot only (decoupled from launch)
+    tools.append(
+        Tool(
+            name="workspace_screenshot",
+            description="Capture a fullscreen screenshot and save it under the workspace .agent/screenshots directory.",
+            inputSchema=_schema(ScreenshotInput),
         )
     )
 
@@ -116,6 +160,22 @@ async def list_tools() -> list[Tool]:
         )
     )
 
+    # Python runner & venv selection
+    tools.append(
+        Tool(
+            name="workspace_python_run_module",
+            description="Run 'python -m <module>' using a specified virtualenv without activating it.",
+            inputSchema=_schema(PythonRunModuleInput),
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_python_run_script",
+            description="Run a Python script file using a specified virtualenv without activating it.",
+            inputSchema=_schema(PythonRunScriptInput),
+        )
+    )
+
     # Note: OpenWeb scripts are intentionally NOT exposed as MCP tools to avoid easy tampering.
 
     # Workspace: list tracked repos
@@ -146,11 +206,28 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
+            name="workspace_select_venv",
+            description=(
+                "Select the best virtualenv path from candidates using simple heuristics (.venv preferred, then venv, then *_env*, then env; tie-breakers by depth, then parent name length)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["paths"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
             name="workspace_find_venvs",
             description="Find virtualenv roots by looking for pyvenv.cfg or bin/activate (prunes .git only)",
             inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
         )
     )
+
+    # (workspace_select_venv listed earlier)
 
     # Workspace: read/write files
     tools.append(
@@ -165,6 +242,21 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["path"],
             },
+        )
+    )
+    # Workspace utilities: tar and digest
+    tools.append(
+        Tool(
+            name="workspace_tar_create",
+            description="Create a .tar.gz archive from workspace items under a base directory",
+            inputSchema=_schema(TarCreateInput),
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_file_digest",
+            description="Compute a file digest (sha256 or md5) for a workspace file",
+            inputSchema=_schema(DigestInput),
         )
     )
     tools.append(
@@ -297,8 +389,17 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
-    if not container_manager:
+    # Only require container_manager for tools that interact with the container
+    container_required = name not in {"workspace_select_venv"}
+    if container_required and not container_manager:
         raise RuntimeError("Container manager not initialized")
+
+    # Add a per-call request ID for structured logging
+    req_id = str(uuid.uuid4())
+    logger.info(f"[req={req_id}] call_tool name={name}")
+
+    import time as __t
+    __start_ms = int(__t.time() * 1000)
 
     if name == "workspace_execute_command":
         import threading
@@ -342,14 +443,84 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "message": "Command still running; call again with a larger timeout to wait longer.",
                 "hint": "If you need the final output, call this tool again with a larger timeout or poll until running=false.",
             }
+            logger.info(f"[req={req_id}] tool={name} still running task_id={task_id} timeout={timeout_s}s")
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps(payload))]
         else:
             import json as _json
             if "error" in result_holder:
+                logger.error(f"[req={req_id}] tool={name} error={result_holder['error']}")
+                record_tool_metric(name, int(__t.time()*1000) - __start_ms)
                 return [TextContent(type="text", text=_json.dumps({"exit_code": 1, "error": result_holder["error"], "hint": "Check the error field and adjust the command or environment; re-run if needed."}))]
             exit_code = result_holder.get("exit_code")
             output = result_holder.get("output", "")
+            logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code}")
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
+    elif name == "workspace_screenshot":
+        # Validate and coerce via Pydantic
+        parsed = ScreenshotInput(**(arguments or {}))
+        import datetime as dt
+        delay = int(parsed.delay_seconds)
+        filename = parsed.filename
+        ts = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S")
+        out_name = filename or f"screenshot_{ts}.png"
+        out_path = f"/workspace/.agent/screenshots/{out_name}"
+        # GUI readiness: ensure DISPLAY responds; try small retry loop before capture
+        cmd = (
+            "mkdir -p /workspace/.agent/screenshots && "
+            f"sleep {max(0, delay)}; "
+            "export DISPLAY=:0; "
+            "for i in 1 2 3; do xset q >/dev/null 2>&1 && break; sleep 1; done; "
+            "xdotool key XF86Refresh >/dev/null 2>&1 || true; "
+            f"xfce4-screenshooter -f -s '{out_path}'"
+        )
+        task_id = str(uuid.uuid4())
+        exit_code, output = container_manager.execute_command(cmd, task_id)
+        import json as _json
+        resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output}
+        if _public_host and _public_port:
+            url = build_screenshot_url(_public_host, int(_public_port), out_name)
+            resp["screenshot_url"] = url
+        resp["hint"] = (
+            "Always display the screenshot to the user in the chat. "
+            "If screenshot_url is present, render it inline."
+        )
+        logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code} path={out_path}")
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps(resp))]
+    elif name == "workspace_select_venv":
+        import json as _json
+        paths = arguments.get("paths") or []
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise ValueError("'paths' must be a list of strings")
+
+        def _category(p: str) -> int:
+            base = (p.rstrip("/").split("/") or [""])[-1]
+            if base == ".venv":
+                return 0
+            if base == "venv":
+                return 1
+            if "_env" in base or base.endswith("env") or base.endswith("_env"):
+                return 2
+            if base == "env":
+                return 3
+            return 9
+
+        def _depth(p: str) -> int:
+            return len([s for s in p.split("/") if s])
+
+        def _parent_len(p: str) -> int:
+            parts = [s for s in p.rstrip("/").split("/") if s]
+            return len(parts[-2]) if len(parts) >= 2 else 0
+
+        best = None
+        if paths:
+            best = sorted(paths, key=lambda p: (_category(p), _depth(p), -_parent_len(p), p))[0]
+
+        payload = {"best": best, "candidates": list(paths)}
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps(payload))]
     elif name == "workspace_task_start":
         command = arguments.get("command")
         if not command:
@@ -359,6 +530,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         info = container_manager.start_background_task(command, task_id, extra_env=env_map)
         import json as _json
         payload = {"task_id": task_id, **info, "hint": "Use workspace_task_status to poll and workspace_task_kill to terminate if needed."}
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
     elif name == "workspace_task_status":
         task_id = arguments.get("task_id")
@@ -367,6 +539,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         status = container_manager.get_task_status(task_id)
         import json as _json
         status["hint"] = "If running=true, you can continue polling. When exit_code is not None, fetch logs from the path you used in the command or design the command to emit artifacts."
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(status))]
     elif name == "workspace_task_kill":
         task_id = arguments.get("task_id")
@@ -376,6 +549,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         result = container_manager.kill_task(task_id, signal=sig)
         import json as _json
         result["hint"] = "If the task doesn't stop, try signal=KILL. Then poll status again."
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(result))]
     
     
@@ -392,14 +566,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # Execute the clone repository command
         exit_code, output = container_manager.clone_repository(owner=owner, repo=repo)
         import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "If cloning succeeded, add the repo to your workspace context and consider listing files or opening README next."}))]
     
     elif name == "workspace_launch_and_screenshot":
-        launch_command = arguments.get("launch_command")
-        delay = int(arguments.get("delay_seconds", 2))
-        filename = arguments.get("filename")
-        working_dir = arguments.get("working_dir")
-        env_map = arguments.get("env") or {}
+        data = LaunchAndScreenshotInput(**(arguments or {}))
+        launch_command = data.launch_command
+        delay = int(data.delay_seconds)
+        filename = data.filename
+        working_dir = data.working_dir
+        env_map = data.env or {}
         if not launch_command:
             raise ValueError("'launch_command' is required")
         
@@ -435,6 +611,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"({launch_command}) >/tmp/launch.log 2>&1 & "
             f"sleep {delay}; "
             "export DISPLAY=:0; "
+            "for i in 1 2 3; do xset q >/dev/null 2>&1 && break; sleep 1; done; "
             "xdotool key XF86Refresh >/dev/null 2>&1 || true; "
             f"xfce4-screenshooter -f -s '{out_path}'"
         )
@@ -452,6 +629,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "If screenshot_url is present, render it inline (e.g., Markdown: ![screenshot]({screenshot_url})). "
             "If no URL, show the local path and offer to open it."
         )
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
     
     elif name == "potato_workspace_multi_tool_pipeline":
@@ -575,6 +753,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         exit_code, output = container_manager.execute_command(find_cmd, task_id)
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": "Use these paths for follow-up file reads or summaries; do not print long lists verbatim unless helpful."}))]
     elif name == "workspace_find_venvs":
         subpath = arguments.get("path") or "."
@@ -604,7 +783,102 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         exit_code, output = container_manager.execute_command(find_cmd, task_id)
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": "Use these virtualenv roots to set up Python execution contexts or to activate environments before running code."}))]
+    elif name == "workspace_tar_create":
+        data = TarCreateInput(**(arguments or {}))
+        base = data.base_dir.strip() or "."
+        items = data.items
+        arch = data.archive_name
+        if not items:
+            raise ValueError("'items' must be a non-empty list of relative paths")
+        # Normalize base and construct tar command; ensure we stay under /workspace
+        def _norm_rel(p: str) -> str:
+            s = str(p).strip()
+            if s.startswith("/"):
+                raise ValueError("Absolute paths are not allowed; provide workspace-relative paths")
+            return s
+        base_rel = _norm_rel(base)
+        items_quoted = " ".join(["'" + _norm_rel(p).replace("'", "'\\''") + "'" for p in items])
+        import datetime as _dt
+        ts = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%S")
+        arch_name = arch or f"archive_{ts}.tar.gz"
+        arch_q = arch_name.replace("'", "'\\''")
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{base_rel.replace("'", "'\\''")}' && "
+            f"tar -czf '{arch_q}' {items_quoted}"
+        )
+        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "archive": f"/workspace/{base_rel}/{arch_name}", "output": out, "hint": "You can download or share the archive path as needed."}))]
+    elif name == "workspace_file_digest":
+        data = DigestInput(**(arguments or {}))
+        algo = (data.algorithm or "sha256").lower()
+        if algo not in {"sha256", "md5"}:
+            raise ValueError("Unsupported algorithm; use 'sha256' or 'md5'")
+        path = data.path
+        if not path:
+            raise ValueError("'path' is required")
+        p = str(path).strip()
+        if p.startswith("/") and not p.startswith("/workspace/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed")
+        rel = p[len("/workspace/"):] if p.startswith("/workspace/") else p
+        rel_q = rel.replace("'", "'\\''")
+        bin_name = "sha256sum" if algo == "sha256" else "md5sum"
+        cmd = (
+            "cd /workspace && "
+            f"{bin_name} -- '{rel_q}' | awk '{{print $1}}'"
+        )
+        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        digest = (out or "").strip().split()[0] if out else ""
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": "Store this digest to verify file integrity later."}))]
+    elif name == "workspace_python_run_module":
+        data = PythonRunModuleInput(**(arguments or {}))
+        venv = data.venv_path
+        module = data.module
+        args = data.args
+        if not venv or not module:
+            raise ValueError("'venv_path' and 'module' are required")
+        def _norm(p: str) -> str:
+            p = str(p).strip()
+            if p.startswith("/workspace/"):
+                return p
+            if p.startswith("/"):
+                raise ValueError("Absolute paths outside /workspace are not allowed")
+            return f"/workspace/{p}"
+        py = _norm(venv).rstrip("/") + "/bin/python"
+        arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
+        cmd = f"{py} -m {module} {arg_str}".rstrip()
+        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        import json as _json
+        logger.info(f"[req={req_id}] tool={name} completed exit_code={code} module={module}")
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
+    elif name == "workspace_python_run_script":
+        data = PythonRunScriptInput(**(arguments or {}))
+        venv = data.venv_path
+        script_path = data.script_path
+        args = data.args
+        if not venv or not script_path:
+            raise ValueError("'venv_path' and 'script_path' are required")
+        def _norm(p: str) -> str:
+            p = str(p).strip()
+            if p.startswith("/workspace/"):
+                return p
+            if p.startswith("/"):
+                raise ValueError("Absolute paths outside /workspace are not allowed")
+            return f"/workspace/{p}"
+        py = _norm(venv).rstrip("/") + "/bin/python"
+        sp = _norm(script_path)
+        arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
+        cmd = f"{py} '{sp}' {arg_str}".rstrip()
+        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        import json as _json
+        logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
     elif name == "workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
@@ -624,9 +898,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         data = container_manager.read_workspace_file(rel, binary=binary)
         if binary:
             import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data), "hint": "This is binary content; offer a download or summarize, do not inline raw bytes."}))]
         else:
             import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data), "hint": "Summarize long files; for short text, show key excerpts. Avoid flooding chat with large content."}))]
     elif name == "workspace_write_file":
         rel = arguments.get("path")
@@ -644,6 +920,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 rel = raw[len("/workspace/"):]
         import json as _json
         p = container_manager.write_workspace_file(rel, str(content), append=append, executable=executable)
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable, "hint": "Proceed with next action that uses this file (e.g., run it, open it, or commit it) rather than echoing the entire content."}))]
     elif name == "workspace_git_add":
         repo_path = arguments.get("repo_path")
@@ -658,6 +935,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, you can proceed to commit or push; otherwise surface the error succinctly."}))]
     elif name == "workspace_git_commit":
         repo_path = arguments.get("repo_path")
@@ -674,6 +952,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If commit succeeded, summarize the commit message and next steps (push or create PR)."}))]
     elif name == "workspace_git_push":
         repo_path = arguments.get("repo_path")
@@ -693,6 +972,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase."}))]
     elif name == "workspace_git_pull":
         repo_path = arguments.get("repo_path")
@@ -712,6 +992,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If pull succeeded, summarize changes. If conflicts, advise resolving and committing."}))]
     elif name == "github_get_repository":
         if not container_manager.is_github_available():
@@ -737,6 +1018,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         else:
             payload["output"] = out
         payload["hint"] = "Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely."
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
     
     else:

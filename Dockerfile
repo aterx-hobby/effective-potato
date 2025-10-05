@@ -1,5 +1,7 @@
 FROM effective-potato-base:latest
 
+ARG INSTALL_GUI=1
+
 # Install Rust via rustup
 RUN apt-get update && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh && \
@@ -26,16 +28,17 @@ WORKDIR /workspace
 # Default display for X servers
 ENV DISPLAY=:0
 
-# Copy runtime scripts and supervisor config
+# Copy runtime scripts and supervisor config (only if GUI installed)
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 COPY scripts/xserver-entry.sh /usr/local/bin/xserver-entry.sh
 RUN chmod +x /usr/local/bin/xserver-entry.sh && mkdir -p /var/log/supervisor
 COPY scripts/supervisor/xserver.conf /etc/supervisor/conf.d/xserver.conf
-COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Ensure non-root user exists and owns workspace
 RUN id -u ubuntu >/dev/null 2>&1 || useradd -ms /bin/bash ubuntu && chown -R ubuntu:ubuntu /workspace
 
 # Use entrypoint to start supervisord and then exec main command as ubuntu
+ENV POTATO_GUI=1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]

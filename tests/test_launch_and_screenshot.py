@@ -80,3 +80,21 @@ async def test_launch_and_screenshot_requires_launch_command():
             await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
     finally:
         server.container_manager = orig_cm
+
+
+@pytest.mark.asyncio
+async def test_launch_and_screenshot_missing_command_raises(monkeypatch):
+    from effective_potato import server
+
+    class FakeContainerManager:
+        def execute_command(self, command: str, task_id: str, extra_env=None):
+            return 0, "OK"
+
+    fake = FakeContainerManager()
+    orig_cm = getattr(server, "container_manager", None)
+    try:
+        server.container_manager = fake
+        with pytest.raises(Exception):
+            await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
+    finally:
+        server.container_manager = orig_cm

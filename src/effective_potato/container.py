@@ -719,7 +719,11 @@ class ContainerManager:
             raise RuntimeError("Container is not running")
         pid_p = f"/workspace/.agent/tmp_scripts/task_{task_id}.pid"
         sig = signal or "TERM"
-        cmd = f"bash -lc \"if [ -f '{pid_p}' ]; then pid=\$(cat '{pid_p}' 2>/dev/null); kill -s {sig} \$pid 2>/dev/null || true; fi\""
+        # Use double escaping for $ inside f-string to avoid invalid escape sequence warnings
+        cmd = (
+            "bash -lc \"if [ -f '" + pid_p + "' ]; then pid=\\$(cat '" + pid_p + "' 2>/dev/null); "
+            "kill -s " + sig + " \\${pid} 2>/dev/null || true; fi\""
+        )
         res = self.container.exec_run(cmd=["bash", "-c", cmd], demux=True, user="ubuntu")
         ok = getattr(res, "exit_code", 1) == 0
         return {"task_id": task_id, "signaled": sig, "ok": ok}

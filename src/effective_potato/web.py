@@ -126,6 +126,36 @@ def get_http_log_level() -> Optional[int]:
     return mapping.get(val, logging.WARNING)
 
 
+_metrics_lock = threading.Lock()
+_metrics = {
+    "up": 1,
+    "requests_total": 0,
+    "tool_calls_total": {},  # name -> count
+    "tool_duration_ms": {},  # name -> total ms
+}
+
+
+def record_tool_metric(name: str, duration_ms: int) -> None:
+    with _metrics_lock:
+        _metrics["requests_total"] += 1
+        _metrics["tool_calls_total"][name] = _metrics["tool_calls_total"].get(name, 0) + 1
+        _metrics["tool_duration_ms"][name] = _metrics["tool_duration_ms"].get(name, 0) + max(0, int(duration_ms))
+
+
+def render_metrics_text() -> str:
+    lines = [
+        f"effective_potato_up {_metrics.get('up', 0)}",
+        f"effective_potato_requests_total {_metrics.get('requests_total', 0)}",
+    ]
+    calls = _metrics.get("tool_calls_total", {}) or {}
+    for name, count in sorted(calls.items()):
+        lines.append(f"effective_potato_tool_calls_total{{tool=\"{name}\"}} {count}")
+    durs = _metrics.get("tool_duration_ms", {}) or {}
+    for name, total_ms in sorted(durs.items()):
+        lines.append(f"effective_potato_tool_duration_ms_sum{{tool=\"{name}\"}} {total_ms}")
+    return "\n".join(lines) + "\n"
+
+
 def create_app(workspace_dir: Path) -> Flask:
     app = Flask(__name__)
 
@@ -136,14 +166,10 @@ def create_app(workspace_dir: Path) -> Flask:
     def healthz():  # type: ignore[no-redef]
         return {"status": "ok"}, 200
 
-    # Minimal metrics endpoint (placeholder)
+    # Text metrics for quick scraping
     @app.get("/metrics")
     def metrics():  # type: ignore[no-redef]
-        # Very basic counters; extend later with real metrics
-        return (
-            "effective_potato_up 1\n"
-            "effective_potato_requests_total 0\n"
-        ), 200, {"Content-Type": "text/plain; version=0.0.4"}
+        return (render_metrics_text(), 200, {"Content-Type": "text/plain; version=0.0.4"})
 
     @app.get("/screenshots/<path:filename>")
     def serve_screenshot(filename: str):  # type: ignore[no-redef]
