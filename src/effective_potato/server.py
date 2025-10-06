@@ -942,6 +942,54 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "  active_pid=\"$(xdotool getwindowpid \"$active_id\" 2>/dev/null || true)\"",
             "fi",
             "set -e",
+        ]
+
+        # After detecting the active window, optionally send user-provided inputs to that window id
+        # We classify each item as a key combo (xdotool key) or text (xdotool type) and sleep per delay_ms.
+        def _classify_input(keys: str) -> str:
+            k = (keys or "").strip()
+            if "+" in k:
+                return "key"  # chord like ctrl+n, Alt+F4
+            # Common named keys and function keys
+            named = {
+                "Return","Tab","Escape","BackSpace","Delete","Insert","Space","Home","End",
+                "Prior","Next","Page_Up","Page_Down","Left","Right","Up","Down","KP_Enter",
+                "XF86Refresh","XF86AudioPlay","XF86AudioPause","XF86AudioStop","XF86AudioNext","XF86AudioPrev",
+            }
+            if k in named:
+                return "key"
+            if k.upper().startswith("F") and k[1:].isdigit():
+                return "key"  # F1..F24
+            # Default: treat as literal text
+            return "text"
+
+        for item in inputs:
+            k = item.keys
+            d_ms = max(0, int(item.delay_ms or 0))
+            cls = _classify_input(k)
+            # Escape single quotes for safe bash embedding
+            k_esc = str(k).replace("'", "'\\''")
+            if cls == "key":
+                # Send key combo directly to the detected window id (non-fatal)
+                script_lines += [
+                    "set +e",
+                    f"if [ -n \"$active_id\" ]; then xdotool key --clearmodifiers --window \"$active_id\" '{k_esc}' >/dev/null 2>&1 || true; fi",
+                    "set -e",
+                ]
+            else:
+                # Type literal text into the detected window id
+                script_lines += [
+                    "set +e",
+                    f"if [ -n \"$active_id\" ]; then xdotool type --clearmodifiers --window \"$active_id\" -- '{k_esc}' >/dev/null 2>&1 || true; fi",
+                    "set -e",
+                ]
+            if d_ms > 0:
+                # Sleep accepts fractional seconds; round to milliseconds precision
+                d_s = f"{d_ms/1000:.3f}"
+                script_lines.append(f"sleep {d_s}")
+
+        # Continue with emitting markers and recording
+        script_lines += [
             # Emit markers so we can parse results easily
             "echo WIN_NAME:$active_name",
             "echo WIN_PID:$active_pid",

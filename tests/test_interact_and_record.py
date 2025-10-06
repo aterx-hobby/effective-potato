@@ -50,6 +50,9 @@ async def test_interact_and_record_builds_script(monkeypatch):
         # Should detect active window and focus it (robust non-fatal form)
         assert "xdotool getactivewindow" in cmd
         assert "xdotool windowactivate" in cmd and "xdotool windowfocus" in cmd
+        # Should send inputs to the detected window id
+        assert "xdotool key --clearmodifiers --window \"$active_id\"" in cmd
+        assert "xdotool type --clearmodifiers --window \"$active_id\" --" in cmd
         # Should record video using ffmpeg x11grab for the specified duration
         assert "ffmpeg -y -loglevel error -f x11grab" in cmd
     finally:

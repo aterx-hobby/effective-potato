@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
                      supervisor \
                      xfce4 \
                      xfce4-screenshooter \
+                     vim-gtk3 \
                      ffmpeg \
                      dbus-x11 \
                      xdotool \
