@@ -90,8 +90,6 @@ class InteractAndRecordInput(BaseModel):
     working_dir: str | None = Field(default=None, description="Workspace-relative directory to cd into before launch/record")
     env: dict[str, str] | None = Field(default=None, description="Environment variables to export before launch/record")
     post_launch_delay_seconds: int = Field(default=1, ge=0, description="Delay after launching before probing/recording")
-    # Optional window hint (not yet enforced by recorder but useful for future targeting)
-    window_title: str | None = Field(default=None)
 
 
 class RecommendedFlowInput(BaseModel):
@@ -229,7 +227,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Optionally launch an app, perform light UI interactions (keys only for now), and record the desktop to a WebM file. "
                 "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
-                "Returns JSON containing 'video' (container path), optional 'video_url' (HTTP URL if server is public), window info, and 'exit_code'.\n\n"
+                "Returns JSON containing 'video' (container path), optional 'video_url' (HTTP URL if server is public), window info, and 'exit_code'.\n"
+                "Use the exact video_url as returned (including its port number)—do not modify the host or port; simply embed it in your response.\n\n"
                 "Recommendation: set frame_interval_ms to ≤200ms (≥5 fps) for smooth playback; for best visual detail aim for ~20ms (≈50 fps), hardware permitting.\n\n"
                 "Example tool input (LLM should produce this JSON):\n"
                 "{\n"
@@ -614,9 +613,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             steps = [
                 venv_find,
                 venv_select,
-                {"tool": "workspace_interact_and_record", "args": {"venv": "${steps[1].activate}", "launch_command": ctx.get("launch_command", "python -m app"), "window_title": ctx.get("window_title", "App"), "inputs": ctx.get("inputs", [{"keys": "Return"}]), "duration_seconds": ctx.get("duration_seconds", 10)}},
+                {"tool": "workspace_interact_and_record", "args": {"venv": "${steps[1].activate}", "launch_command": ctx.get("launch_command", "python -m app"), "inputs": ctx.get("inputs", [{"keys": "Return"}]), "duration_seconds": ctx.get("duration_seconds", 10)}},
             ]
-            notes = "Provide a stable window_title. The tool will run '<venv> && <launch_command>' if given."
+            notes = "The tool will run '<venv> && <launch_command>' if given, and will automatically target the most recently active window after launch."
             return flow(steps, notes)
 
         if any(k in q for k in ["run module", "python -m", "module run"]):
@@ -869,6 +868,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # Small grace period after launch so windows can appear
         post_launch_delay = int(parsed.post_launch_delay_seconds)
 
+        # If launch_command starts with a leading 'cd <dir> && ...', extract it as working_dir
+        # so that venv activation occurs in the intended directory and the remaining command runs there.
+        if launch_command:
+            import re as _re
+            m = _re.match(r"^\s*cd\s+(.+?)\s*&&\s*(.*)$", launch_command)
+            if m:
+                wd_raw = m.group(1).strip()
+                rest = (m.group(2) or "").strip() or "true"
+                # Strip quotes around the directory if provided
+                if (wd_raw.startswith("'") and wd_raw.endswith("'")) or (wd_raw.startswith('"') and wd_raw.endswith('"')):
+                    wd_raw = wd_raw[1:-1]
+                # Only adopt if caller didn't explicitly provide working_dir
+                if not working_dir:
+                    working_dir = wd_raw
+                # Remove the leading cd from the launch command to avoid duplicate cd
+                launch_command = rest
+
         # Build a script that optionally launches, detects the active window, and records a fullscreen video with ffmpeg x11grab
         _uid = uuid.uuid4().hex
         video_name = f"{base}_{_uid}.webm"
@@ -907,11 +923,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Give the app a brief moment to create its window before we probe/record
             script_lines.append(f"sleep {max(0, int(post_launch_delay))}")
 
-        # Prepare display and GUI readiness, then detect active window info (non-fatal), and record
+        # Prepare display and GUI readiness, then detect the most recently active window (non-fatal), and record
         script_lines += [
             # Ensure DISPLAY is ready before any xdotool calls
             "export DISPLAY=:0",
             "for i in 1 2 3; do xset q >/dev/null 2>&1 && break; sleep 1; done",
+            # After launching, wait a bit more to allow windows to appear before probing
+            "sleep 1",
             # Non-fatal xdotool queries
             "set +e",
             "active_id=\"$(xdotool getactivewindow 2>/dev/null || true)\"",
@@ -960,7 +978,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload["video_url"] = _b(_public_host, int(_public_port), video_name)
         payload["hint"] = (
             "Always embed the captured video inline in your chat response so the user can view it without extra clicks. "
-            "If video_url is present, render it directly (Markdown example: ![Video]({video_url})). "
+            "If video_url is present, render it directly (Markdown example: ![Video]({video_url})). Use the exact URL as returned, including its port number—do not modify the host or port. "
             "Do not return just a bare link. If no URL is available, show the local path and summarize the capture succinctly."
         )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]

@@ -20,11 +20,12 @@ async def test_flow_for_screenshot():
 async def test_flow_for_record():
     from effective_potato import server
 
-    res = await server.call_tool("workspace_recommended_flow", {"query": "record an interaction video", "context": {"window_title": "App"}})
+    res = await server.call_tool("workspace_recommended_flow", {"query": "record an interaction video", "context": {}})
     data = json.loads(res[0].text)
     steps = data["steps"]
     assert steps[2]["tool"] == "workspace_interact_and_record"
-    assert "window_title" in steps[2]["args"]
+    # No window_title expected anymore; tool automatically targets most recently active window
+    assert "window_title" not in steps[2]["args"]
 
 
 @pytest.mark.asyncio
