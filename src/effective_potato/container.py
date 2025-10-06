@@ -96,8 +96,32 @@ class ContainerManager:
         self.env_file = Path(env_file).absolute()
         self.sample_env_file = Path(sample_env_file).absolute()
         # Allow overrides via args or environment to avoid conflicts (e.g., integration tests)
-        self.image_name = image_name or os.getenv("POTATO_IMAGE_NAME") or "effective-potato-ubuntu"
+        base_image = image_name or os.getenv("POTATO_IMAGE_NAME") or "effective-potato-ubuntu"
         self.container_name = container_name or os.getenv("POTATO_CONTAINER_NAME") or "effective-potato-sandbox"
+        # If this looks like an integration-test container (name contains -it-),
+        # and the image tag matches the common production tag, derive a unique test image tag
+        # to avoid clobbering the production image.
+        if (
+            isinstance(self.container_name, str)
+            and self.container_name.startswith("effective-potato-sandbox-it-")
+            and base_image in {os.getenv("POTATO_IMAGE_NAME") or "effective-potato-ubuntu", "effective-potato-ubuntu"}
+        ):
+            try:
+                suffix = self.container_name.rsplit("-", 1)[-1]
+                if suffix:
+                    self.image_name = f"{base_image}-it-{suffix}"
+                else:
+                    self.image_name = f"{base_image}-it-{uuid.uuid4().hex[:8]}"
+                logger.info(f"Using unique test image tag: {self.image_name} (base: {base_image})")
+            except Exception:
+                self.image_name = f"{base_image}-it-{uuid.uuid4().hex[:8]}"
+                logger.info(f"Using unique test image tag: {self.image_name} (base: {base_image})")
+        else:
+            self.image_name = base_image
+
+        # Track ownership of containers started by this manager instance
+        self._owned_container = False
+        self._force_stop_once = False
 
         # Ensure workspace directories exist
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +130,7 @@ class ContainerManager:
         (agent_dir / "screenshots").mkdir(parents=True, exist_ok=True)
         
         # Load and validate environment variables from .env file
-        self.env_vars: dict[str, str] = {}
+        self.env_vars = {}
         if self.env_file.exists():
             try:
                 self.env_vars = validate_and_load_env_file(self.env_file)
@@ -344,8 +368,13 @@ class ContainerManager:
         Returns:
             The running container instance
         """
-        # Stop and remove existing container if it exists
-        self.stop_container()
+        # Stop and remove existing container if it exists. Allow a one-time force to handle
+        # production rotation while still protecting prod from unit-test cleanup calls.
+        self._force_stop_once = True
+        try:
+            self.stop_container()
+        finally:
+            self._force_stop_once = False
 
         logger.info("Starting Docker container...")
 
@@ -371,6 +400,8 @@ class ContainerManager:
             self.container_id = None
 
         logger.info(f"Container started with ID: {str(self.container_id)[:12]}")
+        # We own this container instance; safe to stop on cleanup
+        self._owned_container = True
         
         # Configure git user and SSH key for ubuntu
         try:
@@ -470,6 +501,21 @@ class ContainerManager:
 
     def stop_container(self) -> None:
         """Stop and remove the container if it's running."""
+        # Guard against accidentally stopping the production container during tests
+        prod_name = (os.getenv("POTATO_CONTAINER_NAME") or "effective-potato-sandbox")
+        is_prod = (self.container_name == prod_name)
+        is_testish = isinstance(self.container_name, str) and self.container_name.startswith("effective-potato-sandbox-it-")
+        explicit = (os.getenv("POTATO_ALLOW_CONTAINER_STOP", "").strip().lower() in ("1", "true", "yes"))
+        force_once = getattr(self, "_force_stop_once", False)
+        allow = force_once or self._owned_container or is_testish or explicit or (not is_prod)
+
+        if not allow and is_prod:
+            logger.warning(
+                "Refusing to stop production container during this operation (guarded). "
+                "Set POTATO_ALLOW_CONTAINER_STOP=1 to override if this is intentional."
+            )
+            return
+
         try:
             # Try to get existing container
             existing = self.client.containers.get(self.container_name)

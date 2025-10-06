@@ -63,6 +63,30 @@ class LaunchAndScreenshotInput(BaseModel):
     venv: str | None = Field(default=None, description="the exact command to activate the virtual environment the project needs, such as 'source venv/bin/activate'")
 
 
+class InteractInputItem(BaseModel):
+    keys: str = Field(description="Keystrokes/text to send (e.g., 'Return', 'Hello', 'ctrl+n')")
+    delay_ms: int = Field(default=0, ge=0, description="Optional delay after sending the keys")
+    type: str | None = Field(default=None, description="Interaction type (e.g., 'keypress'); currently informational")
+
+
+class InteractAndRecordInput(BaseModel):
+    # Optional app launch and venv activation
+    launch_command: str | None = Field(default=None, description="Optional command to launch before recording")
+    venv: str | None = Field(default=None, description="Optional venv activate command, e.g., 'source .venv/bin/activate'")
+    # User interaction sequence (required: at least one item)
+    inputs: list[InteractInputItem] = Field(description="Sequence of interactions; currently only 'keys' are supported")
+    # Recording controls
+    duration_seconds: int = Field(default=30, ge=1)
+    frame_interval_ms: int = Field(default=500, ge=10)
+    output_basename: str = Field(default="session")
+    # Runtime context
+    working_dir: str | None = Field(default=None, description="Workspace-relative directory to cd into before launch/record")
+    env: dict[str, str] | None = Field(default=None, description="Environment variables to export before launch/record")
+    post_launch_delay_seconds: int = Field(default=1, ge=0, description="Delay after launching before probing/recording")
+    # Optional window hint (not yet enforced by recorder but useful for future targeting)
+    window_title: str | None = Field(default=None)
+
+
 class RecommendedFlowInput(BaseModel):
     query: str = Field(description="User goal expressed in natural language")
     context: dict[str, Any] | None = Field(default=None, description="Optional hints like paths or filenames")
@@ -188,6 +212,28 @@ async def list_tools() -> list[Tool]:
                 "Do NOT launch or manage processes in a separate call immediately before this; use the combined launch tool or ensure the UI is ready. Default timeout: 120s (override with timeout_seconds)."
             ),
             inputSchema=_schema(ScreenshotInput),
+        )
+    )
+
+    # Workspace: interact and record
+    tools.append(
+        Tool(
+            name="workspace_interact_and_record",
+            description=(
+                "Optionally launch an app, perform light UI interactions (keys only for now), and record the desktop to a WebM file. "
+                "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
+                "Returns JSON containing 'video' (container path), optional 'video_url' (HTTP URL if server is public), window info, and 'exit_code'.\n\n"
+                "Example tool input (LLM should produce this JSON):\n"
+                "{\n"
+                "  \"duration_seconds\": 15,\n"
+                "  \"frame_interval_ms\": 500,\n"
+                "  \"inputs\": [{\"keys\": \"right\", \"type\": \"keypress\"}],\n"
+                "  \"launch_command\": \"python potato-playground/snake_game.py\",\n"
+                "  \"output_basename\": \"snake_game\",\n"
+                "  \"venv\": \"source potato-playground/snake_env/bin/activate\"\n"
+                "}"
+            ),
+            inputSchema=_schema(InteractAndRecordInput),
         )
     )
 
@@ -802,54 +848,86 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=msg)]
     elif name == "workspace_interact_and_record":
         import json
-        launch_command = (arguments.get("launch_command") or "").strip()
-        venv_cmd = (arguments.get("venv") or "").strip()
-        inputs = arguments.get("inputs") or []
-        duration = int(arguments.get("duration_seconds", 30))
-        interval = int(arguments.get("frame_interval_ms", 500))
-        base = arguments.get("output_basename", "session")
-        if not isinstance(inputs, list) or not inputs:
-            raise ValueError("'inputs' are required (can be a stub for now)")
+        # Parse and validate inputs using Pydantic schema
+        parsed = InteractAndRecordInput(**(arguments or {}))
+        launch_command = (parsed.launch_command or "").strip()
+        venv_cmd = (parsed.venv or "").strip()
+        inputs = parsed.inputs
+        duration = int(parsed.duration_seconds)
+        interval = int(parsed.frame_interval_ms)
+        base = parsed.output_basename
+        working_dir = (parsed.working_dir or "").strip()
+        env_map = parsed.env or {}
+        # Small grace period after launch so windows can appear
+        post_launch_delay = int(parsed.post_launch_delay_seconds)
 
         # Build a script that optionally launches, detects the active window, and records a fullscreen video with ffmpeg x11grab
         _uid = uuid.uuid4().hex
         video_name = f"{base}_{_uid}.webm"
         video_out = f"/workspace/.agent/screenshots/{video_name}"
-        # Derive FPS from frame_interval_ms; default to at least 5 fps
+        # Derive FPS from frame_interval_ms; default to at least 1 fps
         fps = max(1, int(1000 / max(1, interval)))
-        script_lines = [
+
+        # Prepare optional env exports and working directory change
+        export_snippets: list[str] = []
+        if isinstance(env_map, dict):
+            for k, v in env_map.items():
+                try:
+                    ks = str(k)
+                    vs = str(v).replace("'", "'\\''")
+                    export_snippets.append(f"export {ks}='{vs}'")
+                except Exception:
+                    continue
+        exports = ("; ".join(export_snippets) + "; ") if export_snippets else ""
+
+        cd_snippet = "cd /workspace; "
+        if working_dir:
+            wd = working_dir.replace("'", "'\\''")
+            cd_snippet += f"cd -- '{wd}'; "
+
+        script_lines: list[str] = [
             "set -e",
             "mkdir -p /workspace/.agent/screenshots",
+            # Ensure we operate relative to the user's workspace and desired subdir, with optional env
+            f"{cd_snippet}{exports}".rstrip()
         ]
 
         # Optionally launch target command (with optional venv activation)
         if launch_command:
-            if venv_cmd:
-                script_lines.append(f"({venv_cmd} && {launch_command}) >/tmp/launch_interact.log 2>&1 &")
-            else:
-                script_lines.append(f"({launch_command}) >/tmp/launch_interact.log 2>&1 &")
+            launch_with_venv = f"({venv_cmd} && {launch_command})" if venv_cmd else f"({launch_command})"
+            script_lines.append(f"{launch_with_venv} >/tmp/launch_interact.log 2>&1 &")
+            # Give the app a brief moment to create its window before we probe/record
+            script_lines.append(f"sleep {max(0, int(post_launch_delay))}")
 
-        # Detect active window info (name, pid, id) and attempt to focus it (stub input sending)
+        # Prepare display and GUI readiness, then detect active window info (non-fatal), and record
         script_lines += [
-            "active_name=\"$(xdotool getactivewindow getwindowname %@ 2>/dev/null)\"",
-            "active_pid=\"$(xdotool getactivewindow getwindowpid %@ 2>/dev/null)\"",
-            "active_id=\"$(xdotool getactivewindow 2>/dev/null)\"",
-            "if [ -n \"$active_id\" ]; then xdotool windowactivate $active_id && xdotool windowfocus $active_id; fi",
+            # Ensure DISPLAY is ready before any xdotool calls
+            "export DISPLAY=:0",
+            "for i in 1 2 3; do xset q >/dev/null 2>&1 && break; sleep 1; done",
+            # Non-fatal xdotool queries
+            "set +e",
+            "active_id=\"$(xdotool getactivewindow 2>/dev/null || true)\"",
+            "active_name=\"\"",
+            "active_pid=\"\"",
+            "if [ -n \"$active_id\" ]; then",
+            "  xdotool windowactivate \"$active_id\" >/dev/null 2>&1 || true",
+            "  xdotool windowfocus \"$active_id\" >/dev/null 2>&1 || true",
+            "  active_name=\"$(xdotool getwindowname \"$active_id\" 2>/dev/null || true)\"",
+            "  active_pid=\"$(xdotool getwindowpid \"$active_id\" 2>/dev/null || true)\"",
+            "fi",
+            "set -e",
             # Emit markers so we can parse results easily
             "echo WIN_NAME:$active_name",
             "echo WIN_PID:$active_pid",
             "echo WIN_ID:$active_id",
-            # Ensure DISPLAY is ready and get video size
-            "export DISPLAY=:0",
-            "for i in 1 2 3; do xset q >/dev/null 2>&1 && break; sleep 1; done",
+            # Determine video size and record
             "VSIZE=\"$(xrandr | awk '/\\*/ {print $1; exit}')\"",
             "if [ -z \"$VSIZE\" ]; then VSIZE=1280x720; fi",
-            # Record fullscreen video for the requested duration
             f"ffmpeg -y -loglevel error -f x11grab -framerate {fps} -video_size \"$VSIZE\" -i :0.0 -c:v libvpx-vp9 -pix_fmt yuv420p -t {duration} '{video_out}' >/dev/null 2>&1",
             f"echo 'OUTPUT_VIDEO: {video_out}'",
         ]
 
-        full_script = "\n".join(script_lines)
+        full_script = "\n".join([line for line in script_lines if line])
         task_id = str(uuid.uuid4())
         exit_code, output = container_manager.execute_command(full_script, task_id)
 
@@ -873,7 +951,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             from .web import build_screenshot_url as _b
             payload["video_url"] = _b(_public_host, int(_public_port), video_name)
         payload["hint"] = (
-            "If video_url is present, embed a clickable link or player in the chat so it renders in the browser (e.g., Markdown: [▶️ Play]({video_url})). "
+            "If video_url is present, embed it so clients can render/play the WebM. For Markdown, an inline preview works in many UIs: ![Video]({video_url}). "
             "Otherwise provide the local path and a short summary of the capture."
         )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
@@ -912,10 +990,38 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             type_clause = "-type f"
         elif ftype == "dir":
             type_clause = "-type d"
+        # Build a name clause that supports substring matches and extension-trimming
         name_clause = ""
         if isinstance(name_pat, str) and name_pat:
-            esc = name_pat.replace("'", "'\\''")
-            name_clause = f"-name '{esc}'"
+            raw_name = name_pat.strip()
+            # If the caller supplied explicit wildcards (e.g., *.py), honor it exactly
+            if any(ch in raw_name for ch in ["*", "?", "[", "]"]):
+                esc = raw_name.replace("'", "'\\''")
+                name_clause = f"-name '{esc}'"
+            else:
+                # Trim common single extension (e.g., snake.py -> snake) and do substring match
+                base_name = raw_name.rsplit(".", 1)[0] if "." in raw_name else raw_name
+                patterns: list[str] = []
+                if base_name:
+                    # Primary pattern: substring anywhere
+                    patterns.append(f"*{base_name}*")
+                # If the provided name had an extension, optionally also match the raw form
+                if base_name != raw_name:
+                    patterns.append(f"*{raw_name}*")
+                # Deduplicate while preserving order
+                seen = set()
+                uniq_patterns = []
+                for p in patterns:
+                    if p not in seen:
+                        seen.add(p)
+                        uniq_patterns.append(p)
+                if uniq_patterns:
+                    # Build grouped -name clauses: ( -name 'p1' -o -name 'p2' )
+                    parts = []
+                    for pat in uniq_patterns:
+                        esc = pat.replace("'", "'\\''")
+                        parts.append(f"-name '{esc}'")
+                    name_clause = "\\( " + " -o ".join(parts) + " \\)"
 
         # find with escaped parentheses for prune rules: skip .git, .agent, *venv*, *_env*
         prune = "\\( -name .git -o -name .agent -o -name '*venv*' -o -name '*_env*' \\) -prune"
@@ -1290,15 +1396,14 @@ def initialize_server() -> None:
     # Create or reuse container manager
     if container_manager is None:
         # In test/integration contexts, avoid clobbering the production container by name.
-        # Respect explicit POTATO_CONTAINER_NAME if provided; otherwise, pick a unique test-specific name.
+        # Always generate a unique test-specific name to prevent accidental reuse of production names.
         import os as _os, uuid as _uuid
         test_mode = (
             _os.getenv("POTATO_IT_ENABLE", "0").lower() in ("1", "true", "yes")
             or _os.getenv("RUN_INTEGRATION_TESTS", "0") == "1"
             or ("PYTEST_CURRENT_TEST" in _os.environ)
         )
-        explicit_name = _os.getenv("POTATO_CONTAINER_NAME")
-        if test_mode and not explicit_name:
+        if test_mode:
             unique = _uuid.uuid4().hex[:8]
             safe_name = f"effective-potato-sandbox-it-{unique}"
             container_manager = ContainerManager(container_name=safe_name)
