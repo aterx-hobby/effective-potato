@@ -5,8 +5,8 @@ import uuid
 from typing import Any
 from mcp.server import Server
 from mcp.types import Tool, TextContent
-from pydantic import AnyUrl
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from .container import ContainerManager
 from .web import (
@@ -64,9 +64,9 @@ class LaunchAndScreenshotInput(BaseModel):
 
 
 class InteractInputItem(BaseModel):
-    keys: str = Field(description="Keystrokes/text to send (e.g., 'Return', 'Hello', 'ctrl+n')")
-    delay_ms: int = Field(default=0, ge=0, description="Optional delay after sending the keys")
-    type: str | None = Field(default=None, description="Interaction type (e.g., 'keypress'); currently informational")
+    key_sequence: str | None = Field(default=None, description="Space-separated sequence of key names, e.g., 'Insert h e l l o' or 'Escape d d'")
+    delay: int | None = Field(default=None, ge=0, description="Delay in milliseconds (per key when sending sequences, or total when type='sleep')")
+    type: Literal["once", "sleep", "repeat"] | None = Field(default=None, description="Action type. 'repeat' loops key_sequence for the entire recording duration.")
 
 
 class InteractAndRecordInput(BaseModel):
@@ -186,16 +186,7 @@ async def list_tools() -> list[Tool]:
         )
     )
 
-    # Guidance: recommended flow planner
-    tools.append(
-        Tool(
-            name="workspace_recommended_flow",
-            description=(
-                "Given a user goal, return a recommended sequence of MCP tool calls with rationale and input templates. This is a static planner—no execution happens here."
-            ),
-            inputSchema=_schema(RecommendedFlowInput),
-        )
-    )
+    # Note: The recommended flow planner has been disabled to reduce schema surface area and token usage.
 
     # Workspace: launch app and screenshot
     tools.append(
@@ -225,20 +216,23 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="workspace_interact_and_record",
             description=(
-                "Optionally launch an app, perform light UI interactions (keys only for now), and record the desktop to a WebM file. "
+                "Optionally launch an app, perform light UI interactions, and record the desktop to a WebM file. "
                 "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
-                "Returns JSON containing 'video' (container path), optional 'video_url' (HTTP URL if server is public), window info, and 'exit_code'.\n"
+                "Returns JSON containing 'video_url', window info, and 'exit_code'.\n"
                 "Use the exact video_url as returned (including its port number)—do not modify the host or port; simply embed it in your response.\n\n"
+                "Inputs format: items run sequentially. Each item supports {key_sequence, delay, type}. Default type is 'once'. "
+                "type='sleep' waits for 'delay' milliseconds. type='repeat' loops the given key_sequence continuously for the entire recording duration. "
+                "Delays less than 20ms are automatically clamped to 20ms for reliability.\n\n"
                 "Recommendation: set frame_interval_ms to ≤200ms (≥5 fps) for smooth playback; for best visual detail aim for ~20ms (≈50 fps), hardware permitting.\n\n"
-                "Example tool input (LLM should produce this JSON):\n"
-                "{\n"
-                "  \"duration_seconds\": 15,\n"
-                "  \"frame_interval_ms\": 200,\n"
-                "  \"inputs\": [{\"keys\": \"right\", \"type\": \"keypress\"}],\n"
-                "  \"launch_command\": \"python potato-playground/snake_game.py\",\n"
-                "  \"output_basename\": \"snake_game\",\n"
-                "  \"venv\": \"source potato-playground/snake_env/bin/activate\"\n"
-                "}"
+                "Example inputs:\n"
+                "inputs: [\n"
+                "  {\"delay\": 100, \"key_sequence\": \"Insert h e l l o w o r l d\", \"type\": \"once\"},\n"
+                "  {\"delay\": 2000, \"type\": \"sleep\"},\n"
+                "  {\"delay\": 50, \"key_sequence\": \"Escape d d\", \"type\": \"once\"}\n"
+                "]\n\n"
+                "inputs: [\n"
+                "  {\"delay\": 20, \"key_sequence\": \"Up Up Down Down Left Left Right Right\", \"type\": \"repeat\"}\n"
+                "]\n"
             ),
             inputSchema=_schema(InteractAndRecordInput),
         )
@@ -403,30 +397,7 @@ async def list_tools() -> list[Tool]:
         )
     )
 
-    # Workspace: interact and record desktop
-    tools.append(
-        Tool(
-            name="workspace_interact_and_record",
-            description=(
-                "Launch a command (optionally after activating a virtualenv), then record a fullscreen webm using ffmpeg. The active window is detected automatically (name, pid, X11 ID are captured). Provide 'venv' when the app needs a Python venv. Default timeout: 120s (override with timeout_seconds)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "launch_command": {"type": "string", "description": "Optional command to launch before recording (e.g., 'python -m app')"},
-                    "venv": {"type": "string", "description": "the exact command to activate the virtual environment the project needs, such as 'source venv/bin/activate'"},
-                    "inputs": {
-                        "type": "array",
-                        "items": {"type": "object", "properties": {"keys": {"type": "string"}, "delay_ms": {"type": "integer", "default": 100}}, "required": ["keys"]},
-                    },
-                    "duration_seconds": {"type": "integer", "default": 30},
-                    "frame_interval_ms": {"type": "integer", "default": 500},
-                    "output_basename": {"type": "string", "default": "session"},
-                },
-                "required": ["inputs"],
-            },
-        )
-    )
+    # (Removed duplicate workspace_interact_and_record registration)
 
     # Workspace: basic git operations on a local repo
     tools.extend([
@@ -585,62 +556,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code}")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
-    elif name == "workspace_recommended_flow":
-        # Simple heuristics to propose flows; no container needed
-        from json import dumps as _dumps
-        q = (arguments.get("query") or "").lower()
-        ctx = arguments.get("context") or {}
-
-        def flow(steps: list[dict], notes: str):
-            payload = {"steps": steps, "notes": notes}
-            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_dumps(payload))]
-
-        # Common building blocks
-        venv_find = {"tool": "workspace_find_venvs", "args": {"path": ctx.get("path", ".")}}
-        venv_select = {"tool": "workspace_select_venv", "args": {"paths": "${steps[0].venv_roots or steps[0].items}"}}
-
-        if any(k in q for k in ["screenshot", "capture screen", "launch and screenshot", "ui snapshot"]):
-            steps = [
-                venv_find,
-                venv_select,
-                {"tool": "workspace_launch_and_screenshot", "args": {"venv": "${steps[1].activate}", "launch_command": ctx.get("launch_command", "python -m app"), "delay_seconds": ctx.get("delay_seconds", 3)}},
-            ]
-            notes = "The launch tool runs '<venv> && <launch_command>' when 'venv' is provided."
-            return flow(steps, notes)
-
-        if any(k in q for k in ["record", "video", "interaction", "type keys"]):
-            steps = [
-                venv_find,
-                venv_select,
-                {"tool": "workspace_interact_and_record", "args": {"venv": "${steps[1].activate}", "launch_command": ctx.get("launch_command", "python -m app"), "inputs": ctx.get("inputs", [{"keys": "Return"}]), "duration_seconds": ctx.get("duration_seconds", 10)}},
-            ]
-            notes = "The tool will run '<venv> && <launch_command>' if given, and will automatically target the most recently active window after launch."
-            return flow(steps, notes)
-
-        if any(k in q for k in ["run module", "python -m", "module run"]):
-            steps = [
-                venv_find,
-                venv_select,
-                {"tool": "workspace_python_run_module", "args": {"venv_path": "${steps[1].best}", "module": ctx.get("module", "app"), "args": ctx.get("args", [])}},
-            ]
-            notes = "Use python runners when you just need CLI execution without GUI."
-            return flow(steps, notes)
-
-        if any(k in q for k in ["archive", "tar", "zip"]):
-            steps = [
-                {"tool": "workspace_tar_create", "args": {"base_dir": ctx.get("base_dir", "."), "items": ctx.get("items", ["."]) }},
-                {"tool": "workspace_file_digest", "args": {"path": "${steps[0].archive}", "algorithm": ctx.get("algorithm", "sha256")}},
-            ]
-            notes = "Compute a digest after archiving to verify integrity."
-            return flow(steps, notes)
-
-        # Default help
-        steps = [
-            {"tool": "workspace_find", "args": {"path": ctx.get("path", "."), "type": "a"}},
-        ]
-        notes = "No specific flow detected. Start by exploring the workspace."
-        return flow(steps, notes)
+    # 'workspace_recommended_flow' intentionally disabled
     elif name == "workspace_screenshot":
         # Validate and coerce via Pydantic
         parsed = ScreenshotInput(**(arguments or {}))
@@ -680,8 +596,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             url = build_screenshot_url(_public_host, int(_public_port), out_name)
             resp["screenshot_url"] = url
         resp["hint"] = (
-            "Always display the screenshot to the user in the chat. "
-            "If screenshot_url is present, render it inline."
+            "You must show the screenshot to the user. If screenshot_url is present, embed it inline. "
+            "Example (Markdown): ![screenshot]({screenshot_url}). Do not alter the URL."
         )
         logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code} path={out_path}")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -918,8 +834,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         # Optionally launch target command (with optional venv activation)
         if launch_command:
-            launch_with_venv = f"({venv_cmd} && {launch_command})" if venv_cmd else f"({launch_command})"
-            script_lines.append(f"{launch_with_venv} >/tmp/launch_interact.log 2>&1 &")
+            # Activate venv in current shell so $! captures the real process PID of the launched app
+            if venv_cmd:
+                script_lines.append(f"{venv_cmd}")
+            # Launch app in background, capture its PID, and emit a marker for later parsing
+            script_lines.append(
+                f"{launch_command} >/tmp/launch_interact.log 2>&1 & LAUNCH_PID=$!; echo LAUNCH_PID:$LAUNCH_PID"
+            )
             # Give the app a brief moment to create its window before we probe/record
             script_lines.append(f"sleep {max(0, int(post_launch_delay))}")
 
@@ -935,81 +856,166 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "active_id=\"$(xdotool getactivewindow 2>/dev/null || true)\"",
             "active_name=\"\"",
             "active_pid=\"\"",
+            # Ensure LAUNCH_PID is defined even if nothing was launched
+            "LAUNCH_PID=\"${LAUNCH_PID}\"",
             "if [ -n \"$active_id\" ]; then",
+            "  xdotool windowraise \"$active_id\" >/dev/null 2>&1 || true",
             "  xdotool windowactivate \"$active_id\" >/dev/null 2>&1 || true",
             "  xdotool windowfocus \"$active_id\" >/dev/null 2>&1 || true",
             "  active_name=\"$(xdotool getwindowname \"$active_id\" 2>/dev/null || true)\"",
             "  active_pid=\"$(xdotool getwindowpid \"$active_id\" 2>/dev/null || true)\"",
             "fi",
+            # Compare window PID to launch PID (direct or ancestor-descendant)
+            "relation=unknown; pid_match=0;",
+            "if [ -n \"$active_pid\" ] && [ -n \"$LAUNCH_PID\" ]; then",
+            "  if [ \"$active_pid\" = \"$LAUNCH_PID\" ]; then relation=equal; pid_match=1;",
+            "  else",
+            "    cur=\"$active_pid\";",
+            "    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do",
+            "      p=\"$(ps -o ppid= -p \"$cur\" 2>/dev/null | awk '{print $1}')\";",
+            "      [ -z \"$p\" ] && break;",
+            "      [ \"$p\" = \"1\" ] && break;",
+            "      if [ \"$p\" = \"$LAUNCH_PID\" ]; then relation=descendant; pid_match=1; break; fi;",
+            "      cur=\"$p\";",
+            "    done",
+            "  fi",
+            "fi",
+            "echo PID_MATCH:$pid_match",
+            "echo PID_REL:$relation",
             "set -e",
         ]
 
         # After detecting the active window, optionally send user-provided inputs to that window id
-        # We classify each item as a key combo (xdotool key) or text (xdotool type) and sleep per delay_ms.
-        def _classify_input(keys: str) -> str:
-            k = (keys or "").strip()
-            if "+" in k:
-                return "key"  # chord like ctrl+n, Alt+F4
-            # Common named keys and function keys
-            named = {
-                "Return","Tab","Escape","BackSpace","Delete","Insert","Space","Home","End",
-                "Prior","Next","Page_Up","Page_Down","Left","Right","Up","Down","KP_Enter",
-                "XF86Refresh","XF86AudioPlay","XF86AudioPause","XF86AudioStop","XF86AudioNext","XF86AudioPrev",
-            }
-            if k in named:
-                return "key"
-            if k.upper().startswith("F") and k[1:].isdigit():
-                return "key"  # F1..F24
-            # Default: treat as literal text
-            return "text"
+        # New format: key_sequence + delay + type (once|sleep|repeat). Default type='once'.
+        # Backward-compat: if key_sequence not provided, fall back to legacy keys + delay_ms handling.
+        def _sec_from_ms(ms: int) -> str:
+            try:
+                ms_i = max(0, int(ms))
+            except Exception:
+                ms_i = 0
+            if ms_i % 1000 == 0:
+                return str(ms_i // 1000)
+            val = ms_i / 1000.0
+            s = f"{val:.3f}"
+            # trim trailing zeros and dot
+            while s.endswith("0"):
+                s = s[:-1]
+            if s.endswith("."):
+                s = s[:-1]
+            return s or "0"
+
+        # Separate inputs into pre-capture steps and repeat sequences
+        pre_steps: list[str] = []
+        repeat_cmds: list[str] = []
 
         for item in inputs:
-            k = item.keys
-            d_ms = max(0, int(item.delay_ms or 0))
-            cls = _classify_input(k)
-            # Escape single quotes for safe bash embedding
-            k_esc = str(k).replace("'", "'\\''")
-            if cls == "key":
-                # Send key combo directly to the detected window id (non-fatal)
-                script_lines += [
-                    "set +e",
-                    f"if [ -n \"$active_id\" ]; then xdotool key --clearmodifiers --window \"$active_id\" '{k_esc}' >/dev/null 2>&1 || true; fi",
-                    "set -e",
-                ]
+            action = (item.type or "once").strip().lower()
+            # Normalize delay: for non-sleep actions, enforce a minimum of 20ms to avoid xdotool timing issues
+            raw_delay = int(item.delay or 0)
+            if action == "sleep":
+                d_ms = max(0, raw_delay)
             else:
-                # Type literal text into the detected window id
-                script_lines += [
-                    "set +e",
-                    f"if [ -n \"$active_id\" ]; then xdotool type --clearmodifiers --window \"$active_id\" -- '{k_esc}' >/dev/null 2>&1 || true; fi",
-                    "set -e",
-                ]
-            if d_ms > 0:
-                # Sleep accepts fractional seconds; round to milliseconds precision
-                d_s = f"{d_ms/1000:.3f}"
-                script_lines.append(f"sleep {d_s}")
+                d_ms = max(20, raw_delay)
+
+            if action == "sleep":
+                secs = _sec_from_ms(d_ms)
+                pre_steps.append(f"sleep {secs}")
+                continue
+
+            # Build a key invocation for key_sequence
+            if item.key_sequence:
+                raw = item.key_sequence.strip()
+                tokens = [t for t in raw.split() if t]
+                esc_tokens = [t.replace("'", "'\\''") for t in tokens]
+                token_args = " ".join(f"'{t}'" for t in esc_tokens)
+                cmd = f"if [ -n \"$active_id\" ]; then xdotool key --delay {d_ms} --clearmodifiers --window \"$active_id\" {token_args} >/dev/null 2>&1 || true; fi"
+            else:
+                # No key_sequence provided; skip this item silently
+                continue
+
+            if action == "repeat":
+                repeat_cmds.append(cmd)
+            else:
+                pre_steps += ["set +e", cmd, "set -e"]
+
+        # Emit pre-capture steps now (sequential)
+        script_lines += pre_steps
 
         # Continue with emitting markers and recording
         script_lines += [
             # Emit markers so we can parse results easily
             "echo WIN_NAME:$active_name",
             "echo WIN_PID:$active_pid",
+            "echo LAUNCH_PID:$LAUNCH_PID",
             "echo WIN_ID:$active_id",
-            # Determine video size and record
+            # Determine video size
             "VSIZE=\"$(xrandr | awk '/\\*/ {print $1; exit}')\"",
             "if [ -z \"$VSIZE\" ]; then VSIZE=1280x720; fi",
-            f"ffmpeg -y -loglevel error -f x11grab -framerate {fps} -video_size \"$VSIZE\" -i :0.0 -c:v libvpx-vp9 -pix_fmt yuv420p -t {duration} '{video_out}' >/dev/null 2>&1",
-            f"echo 'OUTPUT_VIDEO: {video_out}'",
         ]
+
+        if repeat_cmds:
+            # Start recording in background and loop until it ends, sending repeat sequences
+            script_lines += [
+                f"ffmpeg -y -loglevel error -f x11grab -framerate {fps} -video_size \"$VSIZE\" -i :0.0 -c:v libvpx-vp9 -pix_fmt yuv420p -t {duration} '{video_out}' >/dev/null 2>&1 & FF_PID=$!",
+                "set +e",
+                "while kill -0 \"$FF_PID\" >/dev/null 2>&1; do",
+            ]
+            # Add repeat commands inside the loop
+            for rc in repeat_cmds:
+                script_lines.append(f"  {rc}")
+            script_lines += [
+                "done",
+                "set -e",
+                "wait \"$FF_PID\" 2>/dev/null || true",
+                f"echo 'OUTPUT_VIDEO: {video_out}'",
+            ]
+        else:
+            # Record in the foreground
+            script_lines += [
+                f"ffmpeg -y -loglevel error -f x11grab -framerate {fps} -video_size \"$VSIZE\" -i :0.0 -c:v libvpx-vp9 -pix_fmt yuv420p -t {duration} '{video_out}' >/dev/null 2>&1",
+                f"echo 'OUTPUT_VIDEO: {video_out}'",
+            ]
+
+        # If we launched an app, attempt to terminate it gracefully after recording:
+        # 1) SIGINT to the window's client process id
+        # 2) Wait up to 5s; if still running, SIGKILL
+        if launch_command:
+            script_lines += [
+                "set +e",
+                # First, try to gracefully stop the window's client process
+                "if [ -n \"$active_pid\" ]; then",
+                "  kill -s INT \"$active_pid\" >/dev/null 2>&1 || true",
+                "fi",
+                # Also signal the originally launched PID if it's different
+                "if [ -n \"$LAUNCH_PID\" ] && [ \"$LAUNCH_PID\" != \"$active_pid\" ]; then",
+                "  kill -s INT \"$LAUNCH_PID\" >/dev/null 2>&1 || true",
+                "fi",
+                # Wait up to 5s for both processes to exit
+                "for i in 1 2 3 4 5; do",
+                "  ok=1;",
+                "  if [ -n \"$active_pid\" ]; then ps -p \"$active_pid\" >/dev/null 2>&1 && ok=0; fi;",
+                "  if [ -n \"$LAUNCH_PID\" ]; then ps -p \"$LAUNCH_PID\" >/dev/null 2>&1 && ok=0; fi;",
+                "  [ $ok -eq 1 ] && break;",
+                "  sleep 1;",
+                "done",
+                # Force kill if still alive
+                "if [ -n \"$active_pid\" ]; then ps -p \"$active_pid\" >/dev/null 2>&1 && kill -s KILL \"$active_pid\" >/dev/null 2>&1 || true; fi",
+                "if [ -n \"$LAUNCH_PID\" ]; then ps -p \"$LAUNCH_PID\" >/dev/null 2>&1 && kill -s KILL \"$LAUNCH_PID\" >/dev/null 2>&1 || true; fi",
+                "set -e",
+            ]
 
         full_script = "\n".join([line for line in script_lines if line])
         task_id = str(uuid.uuid4())
         exit_code, output = container_manager.execute_command(full_script, task_id)
 
-        payload = {"exit_code": exit_code, "video": video_out}
+        payload = {"exit_code": exit_code}
         # Parse detected window info from output
         wname = None
         wpid = None
         wid = None
+        lpid = None
+        pid_match = None
+        pid_rel = None
         if output:
             for line in (output or "").splitlines():
                 if line.startswith("WIN_NAME:"):
@@ -1018,16 +1024,33 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     wpid = line.split(":", 1)[1].strip()
                 elif line.startswith("WIN_ID:"):
                     wid = line.split(":", 1)[1].strip()
+                elif line.startswith("LAUNCH_PID:"):
+                    lpid = line.split(":", 1)[1].strip()
+                elif line.startswith("PID_MATCH:"):
+                    try:
+                        pid_match = bool(int(line.split(":", 1)[1].strip()))
+                    except Exception:
+                        pid_match = None
+                elif line.startswith("PID_REL:"):
+                    pid_rel = line.split(":", 1)[1].strip()
         payload["window_name"] = wname
         payload["window_pid"] = wpid
         payload["window_id"] = wid
+        if lpid is not None:
+            payload["launch_pid"] = lpid
+        if pid_match is not None:
+            payload["pid_match"] = pid_match
+        if pid_rel is not None:
+            payload["pid_relation"] = pid_rel
         if _public_host and _public_port:
             from .web import build_screenshot_url as _b
             payload["video_url"] = _b(_public_host, int(_public_port), video_name)
+        else:
+            # Fallback: expose the container path in the video_url field when public URL is unavailable
+            payload["video_url"] = video_out
         payload["hint"] = (
-            "Always embed the captured video inline in your chat response so the user can view it without extra clicks. "
-            "If video_url is present, render it directly (Markdown example: ![Video]({video_url})). Use the exact URL as returned, including its port number—do not modify the host or port. "
-            "Do not return just a bare link. If no URL is available, show the local path and summarize the capture succinctly."
+            "You must show the video to the user. Embed it inline using the exact video_url returned (do not alter host, port, or path). "
+            "Example (Markdown): ![video]({video_url})."
         )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":

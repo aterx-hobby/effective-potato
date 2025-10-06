@@ -2,6 +2,7 @@ import json
 import pytest
 
 
+@pytest.mark.skip(reason="workspace_recommended_flow is disabled/unpublished")
 @pytest.mark.asyncio
 async def test_flow_for_screenshot():
     from effective_potato import server
@@ -16,6 +17,7 @@ async def test_flow_for_screenshot():
     assert "venv" in steps[2]["args"] and steps[2]["args"]["venv"].startswith("${steps[1].")
 
 
+@pytest.mark.skip(reason="workspace_recommended_flow is disabled/unpublished")
 @pytest.mark.asyncio
 async def test_flow_for_record():
     from effective_potato import server
@@ -28,6 +30,7 @@ async def test_flow_for_record():
     assert "window_title" not in steps[2]["args"]
 
 
+@pytest.mark.skip(reason="workspace_recommended_flow is disabled/unpublished")
 @pytest.mark.asyncio
 async def test_flow_for_archive_and_digest():
     from effective_potato import server

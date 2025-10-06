@@ -137,14 +137,19 @@ async def test_workspace_interact_and_record_integration():
 
             res = await server.call_tool(
                 "workspace_interact_and_record",
-                {"inputs": [{"keys": "Return"}], "duration_seconds": 3, "frame_interval_ms": 500, "output_basename": "it_video"},
+                {"inputs": [{"key_sequence": "Return", "delay": 0, "type": "once"}], "duration_seconds": 3, "frame_interval_ms": 500, "output_basename": "it_video"},
             )
             data = json.loads(res[0].text)
             assert data.get("exit_code") == 0
-            video = data.get("video")
-            assert isinstance(video, str) and video.startswith("/workspace/.agent/screenshots/") and video.endswith(".webm")
+            video_url = data.get("video_url")
+            assert isinstance(video_url, str) and video_url.endswith(".webm")
+            # Derive container path from URL path component
+            import urllib.parse as _up
+            parsed = _up.urlparse(video_url)
+            fname = parsed.path.split("/")[-1]
+            container_path = f"/workspace/.agent/screenshots/{fname}"
 
-            code, out = cm.execute_command(f"test -f '{video}' && echo OK", f"it_{uuid.uuid4()}")
+            code, out = cm.execute_command(f"test -f '{container_path}' && echo OK", f"it_{uuid.uuid4()}")
             assert code == 0 and "OK" in out
         finally:
             server.container_manager = orig_cm
