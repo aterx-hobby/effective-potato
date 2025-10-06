@@ -29,13 +29,26 @@ def _first_ipv4(text: str) -> Optional[str]:
     return None
 
 
+def _first_fqdn(text: str) -> Optional[str]:
+    """Extract an FQDN from `host` output lines like:
+    'fqdn.domain.dom has address x.y.a.b' or 'fqdn.domain.dom is an alias for ...'
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        m = re.match(r"^([A-Za-z0-9._-]+)\s+(has address|is an alias for)\b", line)
+        if m:
+            return m.group(1)
+    return None
+
+
 def detect_public_host() -> str:
     """Detect a public-facing hostname/IP for building URLs.
 
     Priority:
-    - EFFECTIVE_POTATO_HOSTNAME
+    - EFFECTIVE_POTATO_HOSTNAME (explicit override)
+    - FQDN from `host $HOSTNAME` (preferred)
+    - socket.getfqdn()
     - EFFECTIVE_POTATO_IP (when not 0.0.0.0)
-    - host $HOSTNAME
     - socket.gethostbyname(gethostname())
     - localhost
     """
@@ -43,19 +56,27 @@ def detect_public_host() -> str:
     if env_host:
         return env_host.strip()
 
-    env_ip = os.getenv("EFFECTIVE_POTATO_IP")
-    if env_ip and env_ip.strip() and env_ip.strip() != "0.0.0.0":
-        return env_ip.strip()
-
     # Try `host $HOSTNAME`
     try:
         cmd = 'host "$HOSTNAME"'
         out = subprocess.check_output(["bash", "-lc", cmd], stderr=subprocess.STDOUT, text=True, timeout=3.0)
-        ip = _first_ipv4(out)
-        if ip:
-            return ip
+        fqdn = _first_fqdn(out)
+        if fqdn:
+            return fqdn
     except Exception:
         pass
+
+    # socket-provided FQDN
+    try:
+        fq = socket.getfqdn()
+        if fq and fq.lower() not in {"localhost", "localhost.localdomain"}:
+            return fq
+    except Exception:
+        pass
+
+    env_ip = os.getenv("EFFECTIVE_POTATO_IP")
+    if env_ip and env_ip.strip() and env_ip.strip() != "0.0.0.0":
+        return env_ip.strip()
 
     # Fallback to socket
     try:
