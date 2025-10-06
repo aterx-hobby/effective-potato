@@ -1049,8 +1049,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Fallback: expose the container path in the video_url field when public URL is unavailable
             payload["video_url"] = video_out
         payload["hint"] = (
-            "You must show the video to the user. Embed it inline using the exact video_url returned (do not alter host, port, or path). "
-            "Example (Markdown): ![video]({video_url})."
+            "You must show the video to the user. Provide a clickable Markdown link using the exact video_url returned "
+            "(do not alter host, port, or path). Example (Markdown): [Open video]({video_url})."
         )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
