@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 import pytest
 
 
@@ -41,11 +43,13 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
 
         res = await server.call_tool("workspace_launch_and_screenshot", args)
         assert isinstance(res, list) and res, "Expected a non-empty TextContent list"
-        text = res[0].text
-
-        # Validate response lines include saved path and URL
-        assert "/workspace/.agent/screenshots/test.png" in text
-        assert "http://localhost:9090/screenshots/test.png" in text
+        data = json.loads(res[0].text)
+        shot_path = data["screenshot_path"]
+        shot_url = data.get("screenshot_url")
+        # Validate response includes saved path and URL with UUID suffix
+        assert shot_path.startswith("/workspace/.agent/screenshots/test_") and shot_path.endswith(".png")
+        assert re.search(r"/workspace/.agent/screenshots/test_[0-9a-f]{32}\.png$", shot_path)
+        assert shot_url and re.search(r"http://localhost:9090/screenshots/test_[0-9a-f]{32}\.png$", shot_url)
 
         # Validate constructed command is self-contained and includes env/dir handling
         cmd = fake.last_command
@@ -59,7 +63,7 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
         assert "sleep 3; " in cmd
         assert "export DISPLAY=:0; " in cmd
         assert "xdotool key XF86Refresh" in cmd
-        assert "xfce4-screenshooter -f -s '/workspace/.agent/screenshots/test.png'" in cmd
+        assert f"xfce4-screenshooter -f -s '{shot_path}'" in cmd
     finally:
         # Restore globals
         server.container_manager = orig_cm
@@ -98,3 +102,45 @@ async def test_launch_and_screenshot_missing_command_raises(monkeypatch):
             await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
     finally:
         server.container_manager = orig_cm
+
+
+@pytest.mark.asyncio
+async def test_launch_and_screenshot_with_venv_prefixes_command(monkeypatch):
+    from effective_potato import server
+
+    class FakeContainerManager:
+        def __init__(self):
+            self.last_command = None
+        def execute_command(self, command: str, task_id: str):
+            self.last_command = command
+            return 0, "OK"
+
+    fake = FakeContainerManager()
+    orig_cm = getattr(server, "container_manager", None)
+    orig_host = getattr(server, "_public_host", None)
+    orig_port = getattr(server, "_public_port", None)
+    try:
+        server.container_manager = fake
+        server._public_host = "localhost"
+        server._public_port = 9090
+
+        args = {
+            "launch_command": "echo hi",
+            "venv": "source venv/bin/activate",
+            "delay_seconds": 1,
+            "filename": "venv.png",
+        }
+
+        res = await server.call_tool("workspace_launch_and_screenshot", args)
+        assert isinstance(res, list) and res
+        data = json.loads(res[0].text)
+        shot_path = data["screenshot_path"]
+        cmd = fake.last_command
+        assert cmd is not None
+        # Ensure venv activation precedes the launch
+        assert "(source venv/bin/activate && echo hi) >/tmp/launch.log 2>&1 &" in cmd
+        assert f"xfce4-screenshooter -f -s '{shot_path}'" in cmd
+    finally:
+        server.container_manager = orig_cm
+        server._public_host = orig_host
+        server._public_port = orig_port

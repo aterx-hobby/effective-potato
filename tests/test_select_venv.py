@@ -26,3 +26,5 @@ async def test_workspace_select_venv_heuristics_and_shape():
     assert data["best"] in {"projects/app/.venv", "projects/short/.venv"}
     # Prefer shallower, so 'projects/short/.venv' should be selected over deeper
     assert data["best"] == "projects/short/.venv"
+    # Activation command provided
+    assert data.get("activate") == "source projects/short/.venv/bin/activate"

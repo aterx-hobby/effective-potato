@@ -4,5 +4,12 @@
         "tests"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    // Disable automatic port forwarding in VS Code for this workspace
+    "remote.autoForwardPorts": false,
+    "remote.portsAttributes": {
+        "*": {
+            "onAutoForward": "ignore"
+        }
+    }
 }

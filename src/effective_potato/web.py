@@ -181,8 +181,11 @@ def create_app(workspace_dir: Path) -> Flask:
     return app
 
 
-def start_http_server(app: Flask, bind_ip: str, port: int) -> threading.Thread:
-    """Start a WSGI server (Werkzeug) in a background daemon thread without writing banners to stdout."""
+def start_http_server(app: Flask, bind_ip: str, port: int) -> tuple[object, threading.Thread]:
+    """Start a WSGI server (Werkzeug) in a background daemon thread without writing banners to stdout.
+
+    Returns (server, thread) so callers can shut it down cleanly.
+    """
     # Configure werkzeug/Flask loggers according to env
     try:
         level = get_http_log_level()
@@ -210,4 +213,21 @@ def start_http_server(app: Flask, bind_ip: str, port: int) -> threading.Thread:
 
     thread = threading.Thread(target=run, name="effective-potato-web", daemon=True)
     thread.start()
-    return thread
+    return server, thread
+
+
+def stop_http_server(server_obj: object) -> None:
+    """Attempt to stop the background HTTP server and close the socket."""
+    try:
+        # Prefer standard shutdown API
+        shutdown = getattr(server_obj, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+    except Exception:
+        pass
+    try:
+        close = getattr(server_obj, "server_close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass

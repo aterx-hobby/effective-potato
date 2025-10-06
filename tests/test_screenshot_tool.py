@@ -1,3 +1,5 @@
+import json
+import re
 import pytest
 
 
@@ -24,15 +26,19 @@ async def test_workspace_screenshot_builds_command(monkeypatch):
         server._public_port = 9090
         res = await server.call_tool("workspace_screenshot", {"filename": "one.png", "delay_seconds": 1})
         assert isinstance(res, list) and res
-        text = res[0].text
-        assert "/workspace/.agent/screenshots/one.png" in text
-        assert "http://localhost:9090/screenshots/one.png" in text
+        data = json.loads(res[0].text)
+        shot_path = data["screenshot_path"]
+        shot_url = data["screenshot_url"]
+        # Expect UUID-suffixed filename preserving basename and extension
+        assert shot_path.startswith("/workspace/.agent/screenshots/one_") and shot_path.endswith(".png")
+        assert re.search(r"/workspace/.agent/screenshots/one_[0-9a-f]{32}\.png$", shot_path)
+        assert re.search(r"http://localhost:9090/screenshots/one_[0-9a-f]{32}\.png$", shot_url)
         cmd = fake.last_cmd
         assert cmd is not None
         assert "mkdir -p /workspace/.agent/screenshots && " in cmd
         assert "sleep 1; " in cmd
         assert "export DISPLAY=:0; " in cmd
-        assert "xfce4-screenshooter -f -s '/workspace/.agent/screenshots/one.png'" in cmd
+        assert f"xfce4-screenshooter -f -s '{shot_path}'" in cmd
     finally:
         server.container_manager = orig_cm
         server._public_host = orig_host

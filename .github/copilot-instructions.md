@@ -13,9 +13,18 @@ effective-potato is an MCP (Model Context Protocol) server that provides callabl
 
 ### Python Setup
 - Use Python 3 for all development
-- Virtual environment location: `$ROOT_PROJECT_DIR/venv`
-- Always activate the venv before running or testing code
-- Install dependencies using pip within the venv
+- Virtual environment location: `./venv` (project root)
+- **ALWAYS** use the existing virtual environment in `./venv`.
+   - Activate it with: `source venv/bin/activate`
+   - Do **not** create a new venv, change interpreters, or attempt to re-provision Python.
+   - If activation fails for any reason, stop and ask for guidance instead of creating a new environment.
+- Install dependencies using pip within the activated venv only.
+   - You have permission to add or update libraries inside this existing venv when needed for development or tests.
+  
+   Before running any scripts or tests, verify the venv is actually active:
+   - `$VIRTUAL_ENV` should be set (non-empty)
+   - `which python` should point to `./venv/bin/python`
+   - `pip -V` should report a path under `./venv`
 
 ### Required Tools
 - Docker for container management
@@ -89,7 +98,8 @@ ls -ltrah /
 ## Development Workflow
 
 1. **Before Making Changes**:
-   - Activate venv: `source venv/bin/activate`
+   - Activate the existing venv: `source venv/bin/activate`
+   - Verify activation: `$VIRTUAL_ENV` is non-empty and `which python` ends with `venv/bin/python`
    - Run existing tests to establish baseline
    - Review relevant code and tests
 
@@ -109,19 +119,31 @@ ls -ltrah /
 ### Running Tests
 ```bash
 source venv/bin/activate
+# Verify venv activation (optional checks)
+echo "$VIRTUAL_ENV"  # should be non-empty
+which python         # should be ./venv/bin/python
 pytest
 ```
 
-### Setting Up Environment
+### Activating the Environment
 ```bash
-# Create venv if not exists
-python3 -m venv venv
-
-# Activate venv
+# Activate the existing venv (do not create a new one)
 source venv/bin/activate
 
+# Optional: verify activation
+echo "$VIRTUAL_ENV"    # non-empty
+which python           # ./venv/bin/python
+pip -V                 # .../venv/lib/pythonX.Y/site-packages
+
 # Install dependencies
-pip install -r requirements.txt  # when available
+pip install -r requirements.txt
+# Dependency Management
+
+- Install a new library (runtime or dev/testing):
+   - Activate the venv, then: `pip install <package>`
+   - Update `requirements.txt` accordingly (pin versions when possible)
+- Prefer minimal, pinned, widely-used libraries. Avoid changing Python versions or creating new environments.
+
 
 # Copy environment config
 cp local/sample.env local/.env
@@ -129,7 +151,7 @@ cp local/sample.env local/.env
 ```
 
 ## Important Notes
-- Always work within the virtual environment
+- Always work within the existing `./venv` virtual environment; never create a new one
 - Never commit `local/.env` (it's gitignored)
 - The container is rebuilt on each startup
 - Use the script-based execution pattern for reliability
@@ -148,22 +170,12 @@ cp local/sample.env local/.env
 
 Track progress here by setting Status to one of: not_started, in_progress, completed. Update as tasks move forward.
 
-1) P0 – Secrets + Task Lifecycle Controls
-- Goal: Stop writing secrets to script files; inject sensitive env via Docker exec environment. Add task lifecycle tools to poll/terminate long-running commands (status/kill by task_id), and ensure robust cleanup.
-- Status: completed
-
-2) P1 – CI, Lint, Type-check, Observability Scaffold
-- Goal: Add GitHub Actions to run ruff, mypy, and pytest (unit by default; optional integration). Add structured logging with per-call request IDs and a basic /metrics endpoint in the Flask app.
-- Status: completed
-
-3) P1 – Python Runner & Venv Selection + Screenshot Decoupling
-- Goal: Tools to detect/select venvs and run Python scripts/modules within a chosen venv. Provide a standalone screenshot tool to capture without re-launching apps.
-- Status: completed
-
-4) P1 – Container Footprint and Optional GUI Layer
-- Goal: Reduce image size/build time via better caching and layering; make the GUI/X stack optionally installable or split into a separate layer/flag.
-- Status: completed
-
 5) P2 – Typed Tool Schemas and Workspace Utilities
 - Goal: Define Pydantic models for tool inputs/outputs to auto-generate JSON Schemas. Add tar/zip/digest helpers and improve GUI robustness (window readiness checks, capture retries).
 - Status: not_started
+
+6) P1 – Integration Tests for Mocked Paths
+- Goal: For every existing unit test that uses mocked data/clients, add a corresponding fully unmocked integration test that runs against a live container image. Use a unique container name to avoid conflicts on shared hosts, isolate a temporary workspace, and mark with `@pytest.mark.integration`.
+- Status: in_progress
+- Coverage: Added integration tests for container lifecycle, workspace_find_venvs via the MCP server, and server watchdog auto-restart with diagnostics capture. Tests are gated by POTATO_IT_ENABLE=1 and use unique container names and a temporary workspace to avoid conflicts.
+- Next: Add integration coverage for tar/digest utilities, Python runner tools (module/script), and GUI flows (screenshot/launch/record) where environment permits; consider an OpenWeb scripts end-to-end test.

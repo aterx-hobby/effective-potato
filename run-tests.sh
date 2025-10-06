@@ -16,10 +16,10 @@ cd "$ROOTDIR"
 # shellcheck source=/dev/null
 source venv/bin/activate
 
-echo "Running pytest..."
-if [ "${RUN_INTEGRATION_TESTS:-0}" = "1" ]; then
-  echo "Including integration tests (RUN_INTEGRATION_TESTS=1)"
-  python -m pytest -q "$@"
-else
-  python -m pytest -q -m "not integration" "$@"
-fi
+echo "Running pytest (including integration tests)..."
+# Force-enable integration tests by default
+export POTATO_IT_ENABLE=${POTATO_IT_ENABLE:-1}
+export RUN_INTEGRATION_TESTS=${RUN_INTEGRATION_TESTS:-1}
+
+# Run full suite
+python -m pytest -q "$@"

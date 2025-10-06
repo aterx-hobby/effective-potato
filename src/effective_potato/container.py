@@ -78,6 +78,9 @@ class ContainerManager:
         workspace_dir: str = "workspace",
         env_file: str = "local/.env",
         sample_env_file: str = "local/sample.env",
+        *,
+        image_name: str | None = None,
+        container_name: str | None = None,
     ):
         """Initialize the container manager.
 
@@ -88,11 +91,13 @@ class ContainerManager:
         """
         self.client = docker.from_env()
         self.container: Optional[Container] = None
+        self.container_id: Optional[str] = None
         self.workspace_dir = Path(workspace_dir).absolute()
         self.env_file = Path(env_file).absolute()
         self.sample_env_file = Path(sample_env_file).absolute()
-        self.image_name = "effective-potato-ubuntu"
-        self.container_name = "effective-potato-sandbox"
+        # Allow overrides via args or environment to avoid conflicts (e.g., integration tests)
+        self.image_name = image_name or os.getenv("POTATO_IMAGE_NAME") or "effective-potato-ubuntu"
+        self.container_name = container_name or os.getenv("POTATO_CONTAINER_NAME") or "effective-potato-sandbox"
 
         # Ensure workspace directories exist
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -359,8 +364,13 @@ class ContainerManager:
             nano_cpus=2_000_000_000,
             environment={"DISPLAY": ":0"},
         )
+        # Cache the current container id
+        try:
+            self.container_id = self.container.id
+        except Exception:
+            self.container_id = None
 
-        logger.info(f"Container started with ID: {self.container.id[:12]}")
+        logger.info(f"Container started with ID: {str(self.container_id)[:12]}")
         
         # Configure git user and SSH key for ubuntu
         try:
@@ -470,6 +480,218 @@ class ContainerManager:
             pass  # Container doesn't exist, nothing to do
         except Exception as e:
             logger.warning(f"Error stopping container: {e}")
+        finally:
+            # Clear cached handle/id; a future start will populate
+            self.container = None
+            self.container_id = None
+
+    def is_container_running(self) -> bool:
+        """Return True if the managed container exists and is running."""
+        try:
+            c = self.client.containers.get(self.container_name)
+        except docker.errors.NotFound:
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to get container state: {e}")
+            return False
+        try:
+            c.reload()
+            state = (c.attrs or {}).get("State", {})
+            running = bool(state.get("Running"))
+            # Refresh cached handle/id when we can
+            self.container = c
+            try:
+                self.container_id = c.id
+            except Exception:
+                pass
+            return running
+        except Exception:
+            # Fallback to status field
+            status = getattr(c, "status", None)
+            is_running = status == "running"
+            # Still attempt to refresh id
+            try:
+                self.container = c
+                self.container_id = c.id
+            except Exception:
+                pass
+            return is_running
+
+    def ensure_container_alive(self) -> bool:
+        """Ensure the container is running; start it if it is stopped or missing.
+
+        Returns True if the container is running after this call, False on failure.
+        """
+        if self.is_container_running():
+            # Keep a handle to the current container object
+            try:
+                self.container = self.client.containers.get(self.container_name)
+                try:
+                    self.container_id = self.container.id
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return True
+        # Collect diagnostics from the stopped container (if it exists) before restarting
+        try:
+            stopped = self.client.containers.get(self.container_name)
+            try:
+                stopped.reload()
+            except Exception:
+                pass
+            self._collect_stopped_container_diagnostics(stopped)
+        except docker.errors.NotFound:
+            logger.warning("Container missing (not found by name); no diagnostics to collect.")
+        except Exception as e:
+            logger.warning(f"Failed to collect diagnostics for stopped container: {e}")
+
+        logger.warning("Container is not running; attempting restart...")
+        try:
+            # Try to start existing container if present
+            try:
+                existing = self.client.containers.get(self.container_name)
+                try:
+                    existing.start()
+                    time.sleep(1)
+                    self.container = existing
+                    try:
+                        self.container_id = existing.id
+                    except Exception:
+                        pass
+                    return True
+                except docker.errors.NotFound:
+                    pass
+                except Exception:
+                    # Fall through to full recreate
+                    pass
+            except docker.errors.NotFound:
+                # Not found by name; recreate
+                pass
+            # Full recreate
+            self.start_container()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to restart container: {e}")
+            return False
+
+    def get_container_id(self) -> Optional[str]:
+        """Return the current container ID if known."""
+        return self.container_id
+
+    def _collect_stopped_container_diagnostics(self, cont: Container) -> None:
+        """Collect basic diagnostics for a stopped/exited container and write under workspace/.agent/container.
+
+        Captures:
+        - inspect.json (container attrs)
+        - logs.txt (last 2000 lines with timestamps)
+        - summary.txt (selected state fields)
+        - events.txt (recent Docker daemon events for this container)
+        """
+        try:
+            # Prepare diagnostics directory
+            diag_dir = self.workspace_dir / ".agent" / "container"
+            diag_dir.mkdir(parents=True, exist_ok=True)
+
+            # Determine naming: timestamp + short id if available
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            try:
+                cid_short = (cont.id or "unknown")[:12]
+            except Exception:
+                cid_short = "unknown"
+            base = f"diag_{ts}_{cid_short}"
+
+            # Collect attrs
+            attrs = {}
+            try:
+                attrs = cont.attrs or {}
+            except Exception:
+                attrs = {}
+
+            # Write inspect.json
+            try:
+                import json as _json
+                (diag_dir / f"{base}_inspect.json").write_text(_json.dumps(attrs, indent=2, sort_keys=True))
+            except Exception as e:
+                logger.debug(f"Failed writing inspect.json: {e}")
+
+            # Collect logs (last 2000 lines)
+            try:
+                raw = cont.logs(timestamps=True, tail=2000) or b""
+                # Ensure text
+                try:
+                    text = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    text = str(raw)
+                (diag_dir / f"{base}_logs.txt").write_text(text)
+            except Exception as e:
+                logger.debug(f"Failed collecting logs: {e}")
+
+            # Write summary
+            try:
+                state = (attrs or {}).get("State", {})
+                lines = []
+                for k in [
+                    "Status",
+                    "Running",
+                    "Paused",
+                    "Restarting",
+                    "OOMKilled",
+                    "Dead",
+                    "ExitCode",
+                    "Error",
+                    "StartedAt",
+                    "FinishedAt",
+                ]:
+                    v = state.get(k)
+                    lines.append(f"{k}: {v}")
+                (diag_dir / f"{base}_summary.txt").write_text("\n".join(lines))
+            except Exception as e:
+                logger.debug(f"Failed writing summary: {e}")
+
+            # Collect recent Docker events for this container (last ~10 minutes)
+            try:
+                import datetime as _dt
+                utc = _dt.timezone.utc
+                since_dt = _dt.datetime.now(utc) - _dt.timedelta(minutes=10)
+                since_iso = since_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                # Filter by container name to be robust if id changed; Docker API events supports filters
+                # Low-level API for events streaming; use client.api.events for better control
+                events = self.client.api.events(filters={"container": [self.container_name]}, decode=True, since=since_iso)
+                ev_lines = []
+                max_lines = 500
+                for ev in events:
+                    try:
+                        # Stop after a sensible number to avoid huge files
+                        if len(ev_lines) >= max_lines:
+                            break
+                        ts = ev.get("timeNano") or int(ev.get("time", 0)) * 1_000_000_000
+                        # Some events include Actor with Attributes; capture key fields
+                        actor = ev.get("Actor", {})
+                        attrs = actor.get("Attributes", {})
+                        line = {
+                            "status": ev.get("status"),
+                            "id": ev.get("id"),
+                            "time": ev.get("time"),
+                            "type": ev.get("Type"),
+                            "action": ev.get("Action"),
+                            "actor_id": actor.get("ID"),
+                            "attributes": {k: attrs.get(k) for k in sorted(attrs.keys()) if k in ("name", "exitCode", "signal", "oom-kill", "image")},
+                        }
+                        import json as _json
+                        ev_lines.append(_json.dumps(line))
+                    except Exception:
+                        continue
+                try:
+                    (diag_dir / f"{base}_events.txt").write_text("\n".join(ev_lines))
+                except Exception as e:
+                    logger.debug(f"Failed writing events.txt: {e}")
+            except Exception as e:
+                logger.debug(f"Failed collecting Docker events: {e}")
+
+            logger.warning(f"Collected container diagnostics at: {diag_dir} (base={base})")
+        except Exception as e:
+            logger.debug(f"Diagnostics collection encountered an error: {e}")
 
     def _authenticate_github(self) -> None:
         """Authenticate GitHub CLI with the token from environment variables."""
