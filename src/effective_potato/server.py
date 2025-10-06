@@ -77,7 +77,14 @@ class InteractAndRecordInput(BaseModel):
     inputs: list[InteractInputItem] = Field(description="Sequence of interactions; currently only 'keys' are supported")
     # Recording controls
     duration_seconds: int = Field(default=30, ge=1)
-    frame_interval_ms: int = Field(default=500, ge=10)
+    frame_interval_ms: int = Field(
+        default=200,
+        ge=10,
+        description=(
+            "Frame interval in milliseconds (lower is smoother). Recommendation: use ≤200ms (≥5 fps) for acceptable smoothness; "
+            "for best visual detail aim for ~20ms (≈50 fps), hardware permitting."
+        ),
+    )
     output_basename: str = Field(default="session")
     # Runtime context
     working_dir: str | None = Field(default=None, description="Workspace-relative directory to cd into before launch/record")
@@ -223,10 +230,11 @@ async def list_tools() -> list[Tool]:
                 "Optionally launch an app, perform light UI interactions (keys only for now), and record the desktop to a WebM file. "
                 "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
                 "Returns JSON containing 'video' (container path), optional 'video_url' (HTTP URL if server is public), window info, and 'exit_code'.\n\n"
+                "Recommendation: set frame_interval_ms to ≤200ms (≥5 fps) for smooth playback; for best visual detail aim for ~20ms (≈50 fps), hardware permitting.\n\n"
                 "Example tool input (LLM should produce this JSON):\n"
                 "{\n"
                 "  \"duration_seconds\": 15,\n"
-                "  \"frame_interval_ms\": 500,\n"
+                "  \"frame_interval_ms\": 200,\n"
                 "  \"inputs\": [{\"keys\": \"right\", \"type\": \"keypress\"}],\n"
                 "  \"launch_command\": \"python potato-playground/snake_game.py\",\n"
                 "  \"output_basename\": \"snake_game\",\n"
@@ -951,8 +959,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             from .web import build_screenshot_url as _b
             payload["video_url"] = _b(_public_host, int(_public_port), video_name)
         payload["hint"] = (
-            "If video_url is present, embed it so clients can render/play the WebM. For Markdown, an inline preview works in many UIs: ![Video]({video_url}). "
-            "Otherwise provide the local path and a short summary of the capture."
+            "Always embed the captured video inline in your chat response so the user can view it without extra clicks. "
+            "If video_url is present, render it directly (Markdown example: ![Video]({video_url})). "
+            "Do not return just a bare link. If no URL is available, show the local path and summarize the capture succinctly."
         )
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
