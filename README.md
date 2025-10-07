@@ -9,6 +9,26 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - **Workspace Persistence**: Mounted workspace directory for file exchange
 - **Custom Environment**: Optional environment variables loaded from local/.env
 
+
+## Olama Custom build instructions with rocm6.4.4
+
+- cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-6.4.4 -DROCM_PATH=/opt/rocm-6.4.4
+- cmake --build --preset "ROCm 6" --parallel $(nproc)
+- sudo mkdir -p /opt/ollama && sudo chown -R $USER:$USER /opt/ollama
+- cmake --install build --component HIP --strip -v
+- CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
+
+
+## Prevent GPU hangs around 15 second mark on large models (gpt-oss:120b) 
+
+- echo 'options amdgpu queue_preemption_timeout_ms=60000 lockup_timeout=60' | sudo tee /etc/modprobe.d/amdgpu-timeouts.conf
+- sudo update-initramfs -u
+- sudo reboot
+- # verify
+- cat /sys/module/amdgpu/parameters/queue_preemption_timeout_ms
+- cat /sys/module/amdgpu/parameters/lockup_timeout
+
+
 ## Included Packages
 
 The Docker container includes:
