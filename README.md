@@ -9,6 +9,10 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - **Workspace Persistence**: Mounted workspace directory for file exchange
 - **Custom Environment**: Optional environment variables loaded from local/.env
 
+- **Typed Tool Schemas**: Many tools validate inputs with Pydantic and expose JSON Schema via list_tools
+- **Background Tasks**: Run long processes in the background and manage them with task tools
+- **Git & Patch Utilities**: Apply unified diffs and review git status/diffs safely
+
 
 ## Olama Custom build instructions with rocm6.4.4
 
@@ -117,12 +121,48 @@ The following tools validate their inputs with Pydantic models and expose JSON S
   - Behavior: launches the app, waits, and captures a fullscreen PNG.
 
 - workspace_python_run_module
-  - Inputs: { venv_path: string (workspace-relative), module: string, args?: string[] }
-  - Behavior: runs `python -m <module>` using `<venv_path>/bin/python` without activating the venv.
+  - Inputs: { venv_path: string (workspace-relative), module: string, args?: string[], background?: boolean }
+  - Behavior: runs `python -m <module>` using `<venv_path>/bin/python` without activating the venv. If `background=true`, returns a task_id.
 
 - workspace_python_run_script
-  - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[] }
-  - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv.
+  - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[], background?: boolean }
+  - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv. If `background=true`, returns a task_id.
+- workspace_apply_patch
+  - Inputs: { base_dir?: string, diff: string (unified diff), strategy?: 'git'|'patch' (default: 'git'), strip?: integer (for patch), reject?: boolean }
+  - Behavior: writes the diff into the workspace and attempts `git apply` first; if it fails, falls back to `patch -pN`. Returns attempts and which strategy was used.
+
+- workspace_git_status
+  - Inputs: { repo_path: string, porcelain?: boolean (default: true) }
+  - Behavior: runs `git status` (porcelain mode for machine-friendly output by default).
+
+- workspace_git_diff
+  - Inputs: { repo_path: string, staged?: boolean, name_only?: boolean, unified?: integer, paths?: string[] }
+  - Behavior: runs `git diff` with options; set staged=true for `--cached`, name_only to list files.
+
+- workspace_git_push (approval-gated)
+  - Inputs: { repo_path: string, remote?: string, branch?: string, set_upstream?: boolean, confirm?: boolean }
+  - Behavior: requires `confirm=true` and is marked with an x-needs-approval schema field. Returns an instructional error if confirm is not true.
+
+- workspace_task_start
+  - Inputs: { command: string, env?: { [k: string]: string } }
+  - Behavior: starts a background task and returns a task_id.
+
+- workspace_task_status
+  - Inputs: { task_id: string }
+  - Behavior: polls a background task; returns {running, exit_code} and details.
+
+- workspace_task_output
+  - Inputs: { task_id: string, tail?: number }
+  - Behavior: reads the log file of a background task; set tail to return only last N lines.
+
+- workspace_task_list
+  - Inputs: { include_status?: boolean }
+  - Behavior: lists known task IDs; can include per-task status.
+
+- workspace_task_kill
+  - Inputs: { task_id: string, signal?: string (default: TERM) }
+  - Behavior: sends a signal to terminate a background task.
+
 
 - workspace_tar_create
   - Inputs: {
@@ -148,27 +188,39 @@ Additionally:
 
 For an MCP client, you can inspect each tool’s JSON Schema from the `list_tools` response to validate arguments before calling.
 
-#### execute_command
+#### execute_command (workspace_execute_command)
 
 Execute a bash command in the sandboxed container.
 
 **Parameters:**
 - `command` (string, required): The bash command to execute
+- `timeout_seconds` (integer, optional, default 120): How long to wait before returning; process may continue running
+- `background` (boolean, optional): If true, runs in the background and returns a `task_id`
+- `env` (object, optional): Extra environment variables for this command
 
 **Returns:**
-- Exit code and output of the command
+- If foreground: exit code and output
+- If background: `task_id` and a hint to use task tools
 
 **Example:**
 ```json
 {
-  "name": "execute_command",
-  "arguments": {
-    "command": "ls -la /"
-  }
+  "name": "workspace_execute_command",
+  "arguments": { "command": "ls -la /" }
+}
+
+{
+  "name": "workspace_execute_command",
+  "arguments": { "command": "uvicorn app:app", "background": true }
 }
 ```
 
-#### list_repositories
+Follow-ups for background tasks:
+- `workspace_task_status` to poll for completion
+- `workspace_task_output` with `tail` to read logs
+- `workspace_task_kill` to stop the process
+
+#### list_repositories / clone_repository
 
 List GitHub repositories for a user or the authenticated user. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
 
@@ -190,29 +242,29 @@ List GitHub repositories for a user or the authenticated user. This tool is only
 }
 ```
 
-#### clone_repository
-
 Clone a GitHub repository into the workspace directory. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
+### Git workflow helpers
 
-**Parameters:**
-- `owner` (string, required): The repository owner (username or organization)
-- `repo` (string, required): The repository name
+Beyond add/commit/pull/push, the server exposes tools to review and safely apply changes:
 
-**Returns:**
-- Exit code and output of the clone operation
+- Review changes:
+  - `workspace_git_status` — machine-friendly status (porcelain)
+  - `workspace_git_diff` — pending or staged changes; use `name_only=true` for a quick file list
 
-**Example:**
-```json
-{
-  "name": "clone_repository",
-  "arguments": {
-    "owner": "octocat",
-    "repo": "Hello-World"
-  }
-}
-```
+- Apply diffs:
+  - `workspace_apply_patch` — try `git apply` first; if it fails, it falls back to `patch -pN`
 
-**Note:** The repository will be cloned into `/workspace/repo-name` in the container.
+- Safety on push:
+  - `workspace_git_push` is approval-gated; callers must set `confirm=true` and should obtain explicit user consent
+
+### Background tasks at a glance
+
+Any long-running command can be backgrounded via `workspace_execute_command` (background=true) or the Python runners. Manage them with:
+
+- `workspace_task_list` — discover known tasks
+- `workspace_task_status` — poll until `running=false`
+- `workspace_task_output` — tail logs with `tail: 200`
+- `workspace_task_kill` — terminate with `signal: "TERM"` (or `"KILL"` if needed)
 
 ## Development
 

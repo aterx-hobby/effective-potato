@@ -7,7 +7,6 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from pydantic import BaseModel, Field
 from typing import Literal
-
 from .container import ContainerManager
 from .web import (
     create_app as create_http_app,
@@ -35,12 +34,13 @@ class PythonRunModuleInput(BaseModel):
     venv_path: str = Field(description="Workspace-relative path to the venv root")
     module: str = Field(description="Python module name to run")
     args: list[str] = Field(default_factory=list)
-
+    background: bool = Field(default=False, description="If true, start as a background task and return task_id")
 
 class PythonRunScriptInput(BaseModel):
     venv_path: str = Field(description="Workspace-relative path to the venv root")
     script_path: str = Field(description="Workspace-relative path to the script")
     args: list[str] = Field(default_factory=list)
+    background: bool = Field(default=False, description="If true, start as a background task and return task_id")
 
 
 class TarCreateInput(BaseModel):
@@ -187,6 +187,7 @@ async def list_tools() -> list[Tool]:
                         "default": 120,
                     },
                     "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "background": {"type": "boolean", "default": False, "description": "If true, run in the background and return task_id"},
                 },
                 "required": ["command"],
             },
@@ -268,6 +269,30 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {"task_id": {"type": "string"}},
                 "required": ["task_id"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_task_output",
+            description="Read or tail the output file of a background task (task_<id>.out)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "tail": {"type": "integer", "default": 0, "description": "If >0, return only the last N lines"},
+                },
+                "required": ["task_id"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_task_list",
+            description="List known background task IDs; optionally include per-task status",
+            inputSchema={
+                "type": "object",
+                "properties": {"include_status": {"type": "boolean", "default": False}},
             },
         )
     )
@@ -567,9 +592,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         except Exception:
             timeout_s = 120
 
+        # Background mode support
+        run_bg = bool(arguments.get("background", False))
+
         result_holder: dict[str, Any] = {}
 
         env_map = arguments.get("env") or {}
+
+        if run_bg:
+            info = container_manager.start_background_task(command, task_id, extra_env=env_map)
+            import json as _json
+            payload = {"task_id": info.get("task_id", task_id), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to read logs, and workspace_task_kill to stop the process."}
+            logger.info(f"[req={req_id}] tool={name} started background task_id={task_id}")
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps(payload))]
 
         def _worker():
             try:
@@ -591,7 +627,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "task_id": task_id,
                 "timeout_seconds": timeout_s,
                 "message": "Command still running; call again with a larger timeout to wait longer.",
-                "hint": "If you need the final output, call this tool again with a larger timeout or poll until running=false.",
+                "hint": "If you need the final output, call again with a larger timeout or poll until running=false. Alternatively, rerun with background=true and use workspace_task_output to tail logs and workspace_task_kill to stop when done.",
             }
             logger.info(f"[req={req_id}] tool={name} still running task_id={task_id} timeout={timeout_s}s")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -694,7 +730,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         task_id = str(uuid.uuid4())
         info = container_manager.start_background_task(command, task_id, extra_env=env_map)
         import json as _json
-        payload = {"task_id": task_id, **info, "hint": "Use workspace_task_status to poll and workspace_task_kill to terminate if needed."}
+        payload = {"task_id": task_id, **info, "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to terminate if needed."}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
     elif name == "workspace_task_status":
@@ -703,7 +739,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError("'task_id' is required")
         status = container_manager.get_task_status(task_id)
         import json as _json
-        status["hint"] = "If running=true, you can continue polling. When exit_code is not None, fetch logs from the path you used in the command or design the command to emit artifacts."
+        status["hint"] = "If running=true, continue polling or use workspace_task_output to tail logs. When exit_code is not None, summarize results and surface artifacts."
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(status))]
     elif name == "workspace_task_kill":
@@ -716,6 +752,53 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         result["hint"] = "If the task doesn't stop, try signal=KILL. Then poll status again."
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(result))]
+    elif name == "workspace_task_output":
+        task_id = arguments.get("task_id")
+        tail = arguments.get("tail", 0)
+        if not task_id:
+            raise ValueError("'task_id' is required")
+        try:
+            n = int(tail)
+            if n < 0:
+                n = 0
+        except Exception:
+            n = 0
+        # Read the out file; apply tail if requested
+        out_path = f"/workspace/.agent/tmp_scripts/task_{task_id}.out"
+        if n > 0:
+            cmd = f"test -f '{out_path}' && tail -n {n} '{out_path}' || true"
+        else:
+            cmd = f"test -f '{out_path}' && cat '{out_path}' || true"
+        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "content": out or "", "path": out_path, "hint": "Show a concise excerpt (use tail for long logs) and offer to open or download if needed."}))]
+    elif name == "workspace_task_list":
+        include_status = bool(arguments.get("include_status", False)) if isinstance(arguments, dict) else False
+        # List files matching task_*.pid under tmp_scripts; derive task IDs
+        probe = (
+            "cd /workspace/.agent/tmp_scripts 2>/dev/null || exit 0; "
+            "ls -1 task_*.pid 2>/dev/null | sed -e 's/^task_//' -e 's/\\.pid$//'"
+        )
+        code, out = container_manager.execute_command(probe, str(uuid.uuid4()))
+        raw_lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
+        def _tid(line: str) -> str:
+            if line.startswith("task_") and line.endswith(".pid"):
+                return line[len("task_"):-len(".pid")]
+            return line
+        task_ids = [_tid(l) for l in raw_lines]
+        payload = {"exit_code": code, "tasks": task_ids}
+        if include_status and task_ids:
+            statuses = {}
+            for tid in task_ids:
+                try:
+                    statuses[tid] = container_manager.get_task_status(tid)
+                except Exception as e:
+                    statuses[tid] = {"error": str(e)}
+            payload["statuses"] = statuses
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps(payload))]
     
     
     elif name == "github_clone_repository":
@@ -1397,6 +1480,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         venv = data.venv_path
         module = data.module
         args = data.args
+        run_bg = bool(getattr(data, "background", False))
         if not venv or not module:
             raise ValueError("'venv_path' and 'module' are required")
         def _norm(p: str) -> str:
@@ -1409,11 +1493,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         py = _norm(venv).rstrip("/") + "/bin/python"
         arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
         cmd = f"{py} -m {module} {arg_str}".rstrip()
+        if run_bg:
+            info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the module."}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git add still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for repos with many files."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout or set background=true.", "hint": "Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done."}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} module={module}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
@@ -1422,6 +1511,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         venv = data.venv_path
         script_path = data.script_path
         args = data.args
+        run_bg = bool(getattr(data, "background", False))
         if not venv or not script_path:
             raise ValueError("'venv_path' and 'script_path' are required")
         def _norm(p: str) -> str:
@@ -1435,11 +1525,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         sp = _norm(script_path)
         arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
         cmd = f"{py} '{sp}' {arg_str}".rstrip()
+        if run_bg:
+            info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the script."}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git commit still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if pre-commit hooks are slow."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout or set background=true.", "hint": "Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done."}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
