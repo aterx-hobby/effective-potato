@@ -53,6 +53,13 @@ class DigestInput(BaseModel):
     path: str = Field(description="Workspace-relative path to file to hash")
     algorithm: str = Field(default="sha256", description="Hash algorithm: sha256 or md5")
 
+class ApplyPatchInput(BaseModel):
+    base_dir: str = Field(default=".", description="Workspace-relative directory to apply the patch in")
+    diff: str = Field(description="Unified diff (patch) content to apply")
+    strategy: Literal["git", "patch"] = Field(default="git", description="Apply using 'git apply' (default) or the 'patch' utility")
+    strip: int = Field(default=1, ge=0, description="For strategy=patch, number of leading path segments to strip (patch -pN)")
+    reject: bool = Field(default=True, description="If true, allow partial application and emit .rej hunks when supported")
+
 
 class LaunchAndScreenshotInput(BaseModel):
     launch_command: str = Field(description="Command to launch (e.g., 'xclock')")
@@ -382,6 +389,15 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
+            name="workspace_apply_patch",
+            description=(
+                "Apply a unified diff patch to files in the workspace. Writes the diff to a temp file and runs either 'git apply' (default) or the 'patch' utility."
+            ),
+            inputSchema=_schema(ApplyPatchInput),
+        )
+    )
+    tools.append(
+        Tool(
             name="workspace_write_file",
             description="Write a file to the workspace",
             inputSchema={
@@ -431,11 +447,13 @@ async def list_tools() -> list[Tool]:
             description="Run git push in a workspace repo",
             inputSchema={
                 "type": "object",
+                "x-needs-approval": True,
                 "properties": {
                     "repo_path": {"type": "string"},
                     "remote": {"type": "string", "default": "origin"},
                     "branch": {"type": "string", "description": "Branch name (defaults to current)"},
                     "set_upstream": {"type": "boolean", "default": False},
+                    "confirm": {"type": "boolean", "default": False, "description": "Must be true to execute push. LLMs must obtain user approval before setting this."},
                 },
                 "required": ["repo_path"],
             },
@@ -455,6 +473,39 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ])
+
+    # Workspace: git status and diff for review
+    tools.append(
+        Tool(
+            name="workspace_git_status",
+            description="Run git status (porcelain by default) in a workspace repo to list pending/staged changes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "Workspace-relative repo path"},
+                    "porcelain": {"type": "boolean", "default": True, "description": "Use --porcelain=v1 -b for machine-friendly output"},
+                },
+                "required": ["repo_path"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_git_diff",
+            description="Run git diff to show pending changes; set staged=true for staged diffs",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "staged": {"type": "boolean", "default": False},
+                    "name_only": {"type": "boolean", "default": False},
+                    "unified": {"type": "integer", "default": 3, "minimum": 0, "description": "Context lines (-U N)"},
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["repo_path"],
+            },
+        )
+    )
 
     # GitHub tools (only if gh available)
     if container_manager and container_manager.is_github_available():
@@ -1270,6 +1321,77 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": "Store this digest to verify file integrity later."}))]
+    elif name == "workspace_apply_patch":
+        data = ApplyPatchInput(**(arguments or {}))
+        # Write the patch content to a temp file under .agent/tmp_scripts so the container can access it
+        patch_uid = uuid.uuid4().hex
+        rel_patch_path = f".agent/tmp_scripts/patch_{patch_uid}.diff"
+        container_manager.write_workspace_file(rel_patch_path, data.diff)
+
+        import json as _json
+        base = (data.base_dir or ".").strip()
+        attempts: list[dict[str, Any]] = []
+        strategy_used = data.strategy
+
+        def _run_git() -> tuple[int | None, str | None, bool]:
+            reject_clause = " --reject" if data.reject else ""
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{base.replace("'", "'\\''")}' && "
+                f"git apply{reject_clause} --whitespace=nowarn '/workspace/{rel_patch_path.replace("'", "'\\''")}'"
+            )
+            timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+            attempts.append({"strategy": "git", "timed_out": timed_out, "exit_code": code, "output": out})
+            # Return (code, out, done)
+            if timed_out:
+                return None, None, True
+            return code, out, code == 0
+
+        def _run_patch() -> tuple[int | None, str | None]:
+            pnum = max(0, int(data.strip or 0))
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{base.replace("'", "'\\''")}' && "
+                f"patch -p{pnum} -s -i '/workspace/{rel_patch_path.replace("'", "'\\''")}'"
+            ).strip()
+            timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+            attempts.append({"strategy": "patch", "timed_out": timed_out, "exit_code": code, "output": out, "strip": pnum})
+            if timed_out:
+                return None, None
+            return code, out
+
+        code: int | None = None
+        out: str | None = None
+
+        if data.strategy == "git":
+            gcode, gout, done = _run_git()
+            if gcode is None and gout is None and done:  # timed out
+                record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+                return [TextContent(type="text", text=_json.dumps({
+                    "exit_code": None,
+                    "timeout_seconds": arguments.get("timeout_seconds", 120) if isinstance(arguments, dict) else 120,
+                    "message": "Patch application still running; try again with a larger timeout.",
+                    "attempts": attempts,
+                    "hint": "If the patch is large, increase timeout_seconds. Consider strategy='patch' for plain unified diffs."
+                }))]
+            if done:
+                code, out = gcode, gout
+            else:
+                # Heuristic fallback to patch when git reports format/validity issues
+                strategy_used = "patch"
+                code, out = _run_patch()
+        else:
+            code, out = _run_patch()
+
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": code,
+            "output": out,
+            "strategy_used": strategy_used,
+            "attempts": attempts,
+            "patch_file": f"/workspace/{rel_patch_path}",
+            "hint": "If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. If it fails, pass strategy='patch' and strip=1 for diffs using 'a/' and 'b/' prefixes."
+        }))]
     elif name == "workspace_python_run_module":
         data = PythonRunModuleInput(**(arguments or {}))
         venv = data.venv_path
@@ -1409,6 +1531,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         remote = arguments.get("remote", "origin")
         branch = arguments.get("branch")
         set_upstream = bool(arguments.get("set_upstream", False))
+        if not bool(arguments.get("confirm", False)):
+            import json as _json
+            msg = {
+                "exit_code": 2,
+                "message": "Push requires explicit approval.",
+                "hint": "Do not run this tool unless the user clearly asked to push. Ask the user to confirm and set confirm=true when calling this tool.",
+                "required_action": "Ask for user confirmation to proceed with git push.",
+            }
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps(msg))]
         if not repo_path:
             raise ValueError("'repo_path' is required")
         remote_s = str(remote).replace("'", "'\\''")
@@ -1474,6 +1606,52 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload["hint"] = "Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely."
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
+    elif name == "workspace_git_status":
+        repo_path = arguments.get("repo_path")
+        if not repo_path:
+            raise ValueError("'repo_path' is required")
+        porcelain = bool(arguments.get("porcelain", True))
+        fmt = " --porcelain=v1 -b" if porcelain else ""
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            f"git status{fmt}"
+        )
+        import json as _json
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git status still running; increase timeout_seconds.", "hint": "Large repos may need more time."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Summarize the key changes (modified, added, deleted) and branch info for the user."}))]
+    elif name == "workspace_git_diff":
+        repo_path = arguments.get("repo_path")
+        if not repo_path:
+            raise ValueError("'repo_path' is required")
+        staged = bool(arguments.get("staged", False))
+        name_only = bool(arguments.get("name_only", False))
+        unified = arguments.get("unified", 3)
+        try:
+            u = int(unified)
+            if u < 0:
+                u = 0
+        except Exception:
+            u = 3
+        files = arguments.get("paths") or []
+        files_q = " ".join(["'" + str(p).replace("'", "'\\''") + "'" for p in files])
+        base = f"git diff{' --cached' if staged else ''}{' --name-only' if name_only else ''} -U {u}"
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            f"{base}{(' ' + files_q) if files_q else ''}"
+        )
+        import json as _json
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git diff still running; increase timeout_seconds.", "hint": "For large diffs, consider name_only=true to list files first."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If the diff is long, summarize key hunks and call out risky changes; include file list with name_only when helpful."}))]
     
     else:
         raise ValueError(f"Unknown tool: {name}")
