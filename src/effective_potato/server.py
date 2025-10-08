@@ -594,6 +594,14 @@ async def list_tools() -> list[Tool]:
             inputSchema=_schema(DigestInput),
         )
     )
+    # Introspection: return the published tool list with schemas
+    tools.append(
+        Tool(
+            name="inspect_tools",
+            description="Inspect the tools published by this server (names, descriptions, input schemas).",
+            inputSchema={"type": "object", "properties": {}},
+        )
+    )
     tools.append(
         Tool(
             name="workspace_apply_patch",
@@ -855,12 +863,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         name = base
         review_mode = True
 
-    # In review-only mode, block direct calls to non-prefixed tools
-    if _is_review_only_mode() and not review_mode:
+    # In review-only mode, block direct calls to non-prefixed tools, except for diagnostics
+    if _is_review_only_mode() and not review_mode and name != "inspect_tools":
         raise ValueError("This server is running in review-only mode; use review_*-prefixed tools only.")
 
     # Only require container_manager for tools that interact with the container
-    container_required = name not in {"workspace_select_venv", "workspace_recommended_flow"}
+    container_required = name not in {"workspace_select_venv", "workspace_recommended_flow", "inspect_tools"}
     if container_required and not container_manager:
         raise RuntimeError("Container manager not initialized")
 
@@ -951,6 +959,35 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
     # 'workspace_recommended_flow' intentionally disabled
+    elif name == "inspect_tools":
+        # Return the current published tools (honoring review-only gating) with schemas
+        all_tools = await list_tools()
+        items = []
+        for t in all_tools:
+            try:
+                items.append({
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.inputSchema,
+                })
+            except Exception:
+                # Fallback minimal entry
+                items.append({"name": getattr(t, "name", "unknown")})
+        # In review-only mode, list_tools() intentionally hides inspect_tools from publication,
+        # but the introspection payload should still include it for diagnostics.
+        if _is_review_only_mode() and not any(it.get("name") == "inspect_tools" for it in items):
+            items.append({
+                "name": "inspect_tools",
+                "description": "Inspect the tools published by this server (names, descriptions, input schemas).",
+                "inputSchema": {"type": "object", "properties": {}},
+            })
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({
+            "count": len(items),
+            "tools": items,
+            "hint": "Use this to verify what your client sees vs server. In review-only mode, only review_* and inspect_tools are exposed.",
+        }))]
     elif name == "workspace_screenshot":
         # Validate and coerce via Pydantic
         parsed = ScreenshotInput(**(arguments or {}))
