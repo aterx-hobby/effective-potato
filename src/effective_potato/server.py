@@ -38,6 +38,16 @@ class PythonRunScriptInput(BaseModel):
     background: bool = Field(default=False, description="If true, start as a background task and return task_id")
 
 
+class PythonCheckSyntaxInput(BaseModel):
+    venv_path: str = Field(description="Workspace-relative path to the venv root")
+    source_path: str = Field(description="Workspace-relative path to the Python source file to compile")
+
+
+class PytestRunInput(BaseModel):
+    venv_path: str = Field(description="Workspace-relative path to the venv root")
+    args: list[str] = Field(default_factory=list, description="Additional pytest args, e.g., ['-q', 'tests']")
+
+
 class TarCreateInput(BaseModel):
     base_dir: str = Field(default=".", description="Workspace-relative directory to run tar from")
     items: list[str] = Field(description="Relative paths (files/dirs) to include in archive")
@@ -485,6 +495,22 @@ async def list_tools() -> list[Tool]:
             name="workspace_python_run_script",
             description="Run a Python script file using a specified virtualenv without activating it.",
             inputSchema=_schema(PythonRunScriptInput),
+        )
+    )
+
+    # Python helpers: syntax check and pytest
+    tools.append(
+        Tool(
+            name="workspace_python_check_syntax",
+            description="Activate a venv and run 'python -m py_compile <source_file>'.",
+            inputSchema=_schema(PythonCheckSyntaxInput),
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_pytest_run",
+            description="Activate a venv and run pytest with optional arguments (e.g., -q tests).",
+            inputSchema=_schema(PytestRunInput),
         )
     )
 
@@ -1933,6 +1959,57 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
+    elif name == "workspace_python_check_syntax":
+        data = PythonCheckSyntaxInput(**(arguments or {}))
+        venv = data.venv_path
+        src = data.source_path
+        if not venv or not src:
+            raise ValueError("'venv_path' and 'source_path' are required")
+        def _norm(p: str) -> str:
+            p = str(p).strip()
+            if p.startswith("/workspace/"):
+                return p
+            if p.startswith("/"):
+                raise ValueError("Absolute paths outside /workspace are not allowed")
+            return f"/workspace/{p}"
+        act = _norm(venv).rstrip("/") + "/bin/activate"
+        sp = _norm(src)
+        # Activate then run py_compile
+        cmd = (
+            f"source '{act}' && python -m py_compile '{sp}'"
+        )
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "py_compile still running; try again with a larger timeout.", "hint": "Large files or slow disks may need more time."}))]
+        import json as _json
+        logger.info(f"[req={req_id}] tool={name} completed exit_code={code} src={src}")
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, the file is syntactically valid; otherwise surface the compile error lines."}))]
+    elif name == "workspace_pytest_run":
+        data = PytestRunInput(**(arguments or {}))
+        venv = data.venv_path
+        args = data.args or []
+        if not venv:
+            raise ValueError("'venv_path' is required")
+        def _norm(p: str) -> str:
+            p = str(p).strip()
+            if p.startswith("/workspace/"):
+                return p
+            if p.startswith("/"):
+                raise ValueError("Absolute paths outside /workspace are not allowed")
+            return f"/workspace/{p}"
+        act = _norm(venv).rstrip("/") + "/bin/activate"
+        arg_str = " ".join(["'" + str(a).replace("'", "'\\''") + "'" for a in args])
+        cmd = f"source '{act}' && pytest {arg_str}".rstrip()
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "pytest still running; try again with a larger timeout.", "hint": "Use -q to reduce output or target specific tests for faster runs."}))]
+        import json as _json
+        logger.info(f"[req={req_id}] tool={name} completed exit_code={code}")
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Summarize pass/fail counts and point to failing tests if any."}))]
     elif name == "workspace_list_repositories":
         import json
         items = container_manager.list_local_repositories()
