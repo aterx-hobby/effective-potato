@@ -6,14 +6,25 @@ class FakeContainerManager:
     def __init__(self):
         self.last_cmd = None
         self.writes = {}
+        self.files = {}
 
     def write_workspace_file(self, rel, content, **kwargs):
+        # Simulate writes to either temp patch file or regular workspace file
         self.writes[rel] = content
+        # If it's not a patch temp, persist to files map
+        if not rel.startswith('.agent/tmp_scripts/patch_'):
+            self.files[rel] = content
         return rel
 
     def execute_command(self, command: str, task_id: str, extra_env=None):
         self.last_cmd = command
         return 0, "applied"
+
+    def read_workspace_file(self, rel, binary=False):
+        if rel in self.files:
+            return self.files[rel]
+        # default a simple file
+        raise FileNotFoundError(rel)
 
 
 @pytest.mark.asyncio
@@ -63,6 +74,9 @@ async def test_workspace_apply_patch_patch_strategy_with_strip(monkeypatch):
         assert cmd.startswith("cd /workspace && cd -- 'proj' && patch -p1 -s -i '/workspace/.agent/tmp_scripts/patch_")
     finally:
         server.container_manager = orig_cm
+
+
+    
 
 
 @pytest.mark.asyncio

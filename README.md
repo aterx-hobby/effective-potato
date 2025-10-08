@@ -128,8 +128,16 @@ The following tools validate their inputs with Pydantic models and expose JSON S
   - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[], background?: boolean }
   - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv. If `background=true`, returns a task_id.
 - workspace_apply_patch
-  - Inputs: { base_dir?: string, diff: string (unified diff), strategy?: 'git'|'patch' (default: 'git'), strip?: integer (for patch), reject?: boolean }
-  - Behavior: writes the diff into the workspace and attempts `git apply` first; if it fails, falls back to `patch -pN`. Returns attempts and which strategy was used.
+  - Inputs: { base_dir?: string, diff: string (Git-style a/b unified diff), strategy?: 'git'|'patch' (default: 'git'), strip?: integer (must be 1), reject?: boolean }
+  - Behavior: writes the diff into the workspace and runs `git apply` (default) or `patch -p1`. Only Git-style diffs with headers `--- a/...` and `+++ b/...` are accepted. Returns attempts and the strategy used.
+  - Minimal example (valid a/b hunk):
+    ```diff
+    --- a/src/file.txt
+    +++ b/src/file.txt
+    @@ -1,1 +1,1 @@
+    -old
+    +new
+    ```
 
 - workspace_git_status
   - Inputs: { repo_path: string, porcelain?: boolean (default: true) }
