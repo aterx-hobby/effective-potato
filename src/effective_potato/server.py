@@ -10,13 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Literal
 from .container import ContainerManager
 from .web import (
-    create_app as create_http_app,
-    start_http_server,
-    get_server_config,
-    build_screenshot_url,
-    get_tool_schema_url,
     record_tool_metric,
-    stop_http_server,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,10 +191,6 @@ app = Server("effective-potato")
 
 # Container manager instance
 container_manager: ContainerManager | None = None
-_http_thread = None
-_http_server = None
-_public_host = None
-_public_port = None
 
 # Read-only toolset exposure for code-review models
 # These base tool names are considered safe (no write/mutation of workspace state)
@@ -292,8 +282,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Optionally launch an app, perform light UI interactions, and record the desktop to a WebM file. "
                 "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
-                "Returns JSON containing 'video_url', window info, and 'exit_code'.\n"
-                "Use the exact video_url as returned (including its port number)—do not modify the host or port; simply embed it in your response.\n\n"
+                "Returns JSON containing 'video_path', window info, and 'exit_code'.\n\n"
                 "Inputs format: items run sequentially. Each item supports {key_sequence, delay, type}. Default type is 'once'. "
                 "type='sleep' waits for 'delay' milliseconds. type='repeat' loops the given key_sequence continuously for the entire recording duration. "
                 "Delays less than 20ms are automatically clamped to 20ms for reliability.\n\n"
@@ -792,14 +781,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Screenshot still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if you need to wait longer for the desktop to settle before capture."}))]
         import json as _json
-        resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output}
-        if _public_host and _public_port:
-            url = build_screenshot_url(_public_host, int(_public_port), out_name)
-            resp["screenshot_url"] = url
-        resp["hint"] = (
-            "You must show the screenshot to the user. If screenshot_url is present, embed it inline. "
-            "Example (Markdown): ![screenshot]({screenshot_url}). Do not alter the URL."
-        )
+        resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output,
+                "hint": "Display the screenshot to the user; use the provided 'screenshot_path'."}
         logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code} path={out_path}")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
@@ -996,17 +979,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Launch and capture still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if the app needs longer to render before capture."}))]
         import json as _json
-        resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output}
-        if _public_host and _public_port:
-            fname = out_name
-            url = build_screenshot_url(_public_host, int(_public_port), fname)
-            resp["screenshot_url"] = url
-        # Always include a UX hint: screenshots should be displayed to the user
-        resp["hint"] = (
-            "Always display the screenshot to the user in the chat. "
-            "If screenshot_url is present, render it inline (e.g., Markdown: ![screenshot]({screenshot_url})). "
-            "If no URL, show the local path and offer to open it."
-        )
+        resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output,
+                "hint": "Display the screenshot to the user; use the provided 'screenshot_path'."}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
     
@@ -1290,16 +1264,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload["pid_match"] = pid_match
         if pid_rel is not None:
             payload["pid_relation"] = pid_rel
-        if _public_host and _public_port:
-            from .web import build_screenshot_url as _b
-            payload["video_url"] = _b(_public_host, int(_public_port), video_name)
-        else:
-            # Fallback: expose the container path in the video_url field when public URL is unavailable
-            payload["video_url"] = video_out
-        payload["hint"] = (
-            "You must show the video to the user. Provide a clickable Markdown link using the exact video_url returned "
-            "(do not alter host, port, or path). Example (Markdown): [Open video]({video_url})."
-        )
+        # Always return the container path for media
+        payload["video_path"] = video_out
+        payload["hint"] = "Provide the video to the user; use 'video_path' at /workspace/.agent/screenshots/."
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
         # Validate workspace-relative path
@@ -2052,22 +2019,7 @@ def initialize_server() -> None:
     except Exception as e:
         logger.warning(f"Workspace prune on startup failed: {e}")
 
-    # Start HTTP server for screenshots and future endpoints (skip in review-only mode)
-    global _http_thread, _http_server, _public_host, _public_port
-    if not _is_review_only_mode():
-        from pathlib import Path
-        bind_ip, port, public_host = get_server_config()
-        http_app = create_http_app(Path(container_manager.workspace_dir))
-        server_obj, thread = start_http_server(http_app, bind_ip, port)
-        _http_thread = thread
-        _http_server = server_obj
-        _public_host = public_host
-        _public_port = port
-    else:
-        _http_thread = None
-        _http_server = None
-        _public_host = None
-        _public_port = None
+    # HTTP server removed: artifacts are referenced by absolute container paths only
 
     # Write readiness file only in full (read/write) mode; review mode is read-only
     if not _is_review_only_mode():
@@ -2094,11 +2046,6 @@ def initialize_server() -> None:
                 "server": {
                     "mode": "full",
                     "pid": _os.getpid(),
-                    "http": {
-                        "host": _public_host,
-                        "port": _public_port,
-                        "enabled": _public_host is not None and _public_port is not None,
-                    },
                 },
                 # Review section is managed by the main server; review app does not write this file
                 "review": {
@@ -2178,17 +2125,8 @@ def initialize_server() -> None:
 
 
 def cleanup_server() -> None:
-    """Clean up server resources."""
+    """Clean up server resources (no HTTP server to stop)."""
     global container_manager
-
-    # Stop HTTP server if running to free the port
-    global _http_server
-    try:
-        if _http_server is not None:
-            stop_http_server(_http_server)
-    finally:
-        _http_server = None
-
     if container_manager:
         logger.info("Cleaning up server...")
         container_manager.cleanup()

@@ -23,12 +23,8 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
 
     fake = FakeContainerManager()
     orig_cm = getattr(server, "container_manager", None)
-    orig_host = getattr(server, "_public_host", None)
-    orig_port = getattr(server, "_public_port", None)
     try:
         server.container_manager = fake
-        server._public_host = "localhost"
-        server._public_port = 9090
 
         args = {
             "launch_command": "echo hello",
@@ -45,11 +41,9 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
         assert isinstance(res, list) and res, "Expected a non-empty TextContent list"
         data = json.loads(res[0].text)
         shot_path = data["screenshot_path"]
-        shot_url = data.get("screenshot_url")
-        # Validate response includes saved path and URL with UUID suffix
+    # Validate response includes saved path with UUID suffix
         assert shot_path.startswith("/workspace/.agent/screenshots/test_") and shot_path.endswith(".png")
         assert re.search(r"/workspace/.agent/screenshots/test_[0-9a-f]{32}\.png$", shot_path)
-        assert shot_url and re.search(r"http://localhost:9090/screenshots/test_[0-9a-f]{32}\.png$", shot_url)
 
         # Validate constructed command is self-contained and includes env/dir handling
         cmd = fake.last_command
@@ -67,8 +61,6 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
     finally:
         # Restore globals
         server.container_manager = orig_cm
-        server._public_host = orig_host
-        server._public_port = orig_port
 
 
 @pytest.mark.asyncio
@@ -117,12 +109,8 @@ async def test_launch_and_screenshot_with_venv_prefixes_command(monkeypatch):
 
     fake = FakeContainerManager()
     orig_cm = getattr(server, "container_manager", None)
-    orig_host = getattr(server, "_public_host", None)
-    orig_port = getattr(server, "_public_port", None)
     try:
         server.container_manager = fake
-        server._public_host = "localhost"
-        server._public_port = 9090
 
         args = {
             "launch_command": "echo hi",
@@ -142,5 +130,3 @@ async def test_launch_and_screenshot_with_venv_prefixes_command(monkeypatch):
         assert f"xfce4-screenshooter -f -s '{shot_path}'" in cmd
     finally:
         server.container_manager = orig_cm
-        server._public_host = orig_host
-        server._public_port = orig_port

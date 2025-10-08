@@ -11,7 +11,6 @@ requires-python = ">=3.8"
 dependencies = [
   "mcp>=1.0.0",
   "docker>=7.0.0",
-  "flask>=3.0.0",
   "PyYAML>=6.0",
   "pydantic>=2.5.0",
 ]

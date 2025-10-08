@@ -10,7 +10,7 @@ This tool is self-contained: it launches the target X11 application and captures
   - Launch your command in the background.
   - Wait `delay_seconds` to allow the UI to render.
   - Take a fullscreen screenshot and save it under `/workspace/.agent/screenshots/`.
-  - If the HTTP server is enabled, it returns a public URL for the image.
+  - The tool returns `screenshot_path` (the absolute container path).
 - The DISPLAY is handled internally (`:0`). You do not need to set it.
 
 ## Input parameters
@@ -43,4 +43,4 @@ Using the MCP server's tool call:
 Notes:
 - Do NOT start `xclock` (or any app) before running the tool. The tool must own the launch-and-capture lifecycle.
 - If you need longer to render, increase `delay_seconds` (e.g., larger app start times).
-- The saved path will be `/workspace/.agent/screenshots/demo_clock.png` and, if the HTTP server is running, a URL will be returned in the tool response.
+- The saved path will be `/workspace/.agent/screenshots/demo_clock.png`, and the tool response will include `screenshot_path`.

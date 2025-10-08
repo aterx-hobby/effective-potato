@@ -20,12 +20,8 @@ async def test_interact_and_record_builds_script(monkeypatch):
 
     fake = FakeContainerManager()
     orig_cm = getattr(server, "container_manager", None)
-    orig_host = getattr(server, "_public_host", None)
-    orig_port = getattr(server, "_public_port", None)
     try:
         server.container_manager = fake
-        server._public_host = "localhost"
-        server._public_port = 9090
 
         args = {
             "inputs": [
@@ -40,10 +36,10 @@ async def test_interact_and_record_builds_script(monkeypatch):
         res = await server.call_tool("workspace_interact_and_record", args)
         assert isinstance(res, list) and res, "Expected a response"
         data = json.loads(res[0].text)
-        video_url = data["video_url"]
-        # Expect URL or fallback path containing the UUID-suffixed webm filename
-        assert video_url.endswith(".webm")
-        assert re.search(r"rec_test_[0-9a-f]{32}\.webm$", video_url)
+        video_path = data["video_path"]
+        # Expect container path containing the UUID-suffixed webm filename
+        assert video_path.endswith(".webm")
+        assert re.search(r"/workspace/.agent/screenshots/rec_test_[0-9a-f]{32}\.webm$", video_path)
 
         cmd = fake.last_command
         assert cmd is not None
@@ -57,8 +53,6 @@ async def test_interact_and_record_builds_script(monkeypatch):
         assert "ffmpeg -y -loglevel error -f x11grab" in cmd
     finally:
         server.container_manager = orig_cm
-        server._public_host = orig_host
-        server._public_port = orig_port
 
 
 @pytest.mark.asyncio
@@ -87,7 +81,7 @@ async def test_interact_and_record_optional_launch_with_venv(monkeypatch):
         res = await server.call_tool("workspace_interact_and_record", args)
         assert isinstance(res, list) and res
         data = json.loads(res[0].text)
-        video_url = data["video_url"]
+        video_path = data["video_path"]
         cmd = fake.last_command
         assert cmd is not None
         # New behavior: venv is activated in the shell, then command is launched with LAUNCH_PID captured

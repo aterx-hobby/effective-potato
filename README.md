@@ -157,7 +157,7 @@ The following tools validate their inputs with Pydantic models and expose JSON S
 
 - workspace_screenshot
   - Inputs: { filename?: string, delay_seconds?: integer >= 0 }
-  - Behavior: captures a fullscreen PNG into `/workspace/.agent/screenshots/<name>.png`. When the HTTP server is active, a `screenshot_url` is included for inline rendering.
+  - Behavior: captures a fullscreen PNG into `/workspace/.agent/screenshots/<name>.png`. The tool returns `screenshot_path`; clients should surface or fetch the file as appropriate for their UI.
 
 - workspace_launch_and_screenshot
   - Inputs: {

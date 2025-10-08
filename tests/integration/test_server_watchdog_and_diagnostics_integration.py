@@ -26,12 +26,7 @@ async def test_server_watchdog_restarts_and_collects_diagnostics():
         cname = f"effective-potato-sandbox-it-{unique}"
         image = os.environ.get("POTATO_IMAGE_NAME", "effective-potato-ubuntu")
 
-        # Choose a random high port to avoid conflicts for HTTP server
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            free_port = s.getsockname()[1]
-        os.environ["EFFECTIVE_POTATO_PORT"] = str(free_port)
+        # No HTTP server is used anymore; no port selection needed.
 
         # Initialize a fresh container manager and inject into server
         cm = ContainerManager(
