@@ -67,40 +67,19 @@ def _is_v4a_patch(text: str) -> bool:
 
 class ApplyPatchInput(BaseModel):
     base_dir: str = Field(default=".", description="Workspace-relative directory to apply the patch in")
-    diff: str = Field(description="Unified diff content: either Git-style a/b headers ('--- a/...', '+++ b/...') or V4A apply_patch format (*** Begin Patch ... *** End Patch).")
+    diff_path: str = Field(description="Workspace-relative path to a diff/patch file to apply (e.g., .agent/diffs/patch_123.diff)")
     strategy: Literal["git", "patch"] = Field(
         default="git",
         description=(
-            "Apply using 'git apply' (default) or the 'patch' utility for Git-style diffs. V4A apply_patch format is auto-detected and applied directly (strategy is ignored)."
+            "Apply using 'git apply' (default) or the 'patch' utility on the provided diff file."
         ),
     )
     strip: int = Field(
         default=1,
         ge=0,
-        description="Path strip count for 'patch' (-pN). For Git-style a/b diffs this must be 1 (i.e., -p1). Ignored for V4A format.",
+        description="Path strip count for 'patch' (-pN). Ignored for 'git' strategy.",
     )
-    reject: bool = Field(default=True, description="If true, allow partial application and emit .rej hunks when supported")
-
-    @field_validator("strip")
-    @classmethod
-    def _enforce_p1_for_ab(cls, v: int, info):
-        # For git/patch strategies, enforce -p1 for a/b formatted diffs
-        data = info.data or {}
-        strategy = data.get("strategy", "git")
-        diff = data.get("diff", "")
-        if strategy in {"git", "patch"} and (not _is_v4a_patch(diff)) and v != 1:
-            raise ValueError("For Git-style a/b diffs, strip must be 1 (-p1)")
-        return v
-
-    @model_validator(mode="after")
-    def _validate_ab_headers(self):
-        # For git/patch strategies, require presence of a/b headers
-        if self.strategy in {"git", "patch"}:
-            if _is_v4a_patch(self.diff):
-                return self
-            if ("--- a/" not in self.diff) or ("+++ b/" not in self.diff):
-                raise ValueError("Apply patch expects Git-style a/b headers: include '--- a/...' and '+++ b/...', or use V4A '*** Begin Patch' format.")
-        return self
+    reject: bool = Field(default=True, description="For 'git apply': if true, allow partial application and emit .rej hunks when supported")
 
 
 class LaunchAndScreenshotInput(BaseModel):
@@ -549,6 +528,19 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
+            name="workspace_list_dir",
+            description="List immediate subdirectories (depth=1) under the given workspace-relative path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative directory to list (default: .)"},
+                },
+                "required": [],
+            },
+        )
+    )
+    tools.append(
+        Tool(
             name="workspace_select_venv",
             description=(
                 "Select the best virtualenv path from candidates using simple heuristics (.venv preferred, then venv, then *_env*, then env; tie-breakers by depth, then parent name length). Returns an 'activate' field with the exact command to activate it."
@@ -606,11 +598,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="workspace_apply_patch",
             description=(
-                "Apply changes from either (1) a Git-style a/b unified diff (preferred) or (2) a V4A apply_patch block. "
-                "For Git-style diffs, your diff MUST contain '--- a/<path>' and '+++ b/<path>' and at least one '@@' hunk; strip is -p1. "
-                "For V4A, include '*** Begin Patch' with one or more '*** Update File: <path>' sections; hunks are delimited by '@@'. "
-                "We auto-detect the format. Git-style diffs are applied via 'git apply' (default) or 'patch -p1'; V4A diffs are applied directly by reconstructing the file.\n"
-                "Tip (Git-style without a repo): diff -u --label a/<path> --label b/<path> old new"
+                "Apply a unified diff from a file using 'git apply' (default) or 'patch'. "
+                "First, write your diff to the workspace using workspace_write_file (recommended directory: .agent/diffs), then pass its path as 'diff_path'.\n\n"
+                "Notes: git apply uses the file as-is; 'patch' honors the 'strip' (-pN) value."
             ),
             inputSchema=_schema(ApplyPatchInput),
         )
@@ -1638,6 +1628,46 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "activations": activations,
             "hint": "Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you."
         }))]
+    elif name == "workspace_list_dir":
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+        # Use find with maxdepth/mindepth to list only immediate directories, skipping .git and .agent
+        rel_esc = rel.replace("'", "'\\''")
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel_esc}' && "
+            "find . -mindepth 1 -maxdepth 1 -type d ! -name .git ! -name .agent -print"
+        )
+        timed_out, code, out = _exec_with_timeout(find_cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({
+                "exit_code": None,
+                "timeout_seconds": arguments.get("timeout_seconds", 120),
+                "message": "Directory listing still running; try again with a larger timeout.",
+                "hint": "Large directory trees may be slow; keep to shallow paths.",
+            }))]
+        items = [line.strip() for line in (out or "").splitlines() if line.strip()]
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": code,
+            "items": items,
+            "hint": "Use these directory names to navigate or refine searches; results are depth=1 only.",
+        }))]
     elif name == "workspace_tar_create":
         data = TarCreateInput(**(arguments or {}))
         base = data.base_dir.strip() or "."
@@ -1701,140 +1731,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": "Store this digest to verify file integrity later."}))]
     elif name == "workspace_apply_patch":
         data = ApplyPatchInput(**(arguments or {}))
-        import json as _json, re as _re
+        import json as _json
         base = (data.base_dir or ".").strip()
         attempts: list[dict[str, Any]] = []
         strategy_used = data.strategy
 
-        # If it's a V4A patch, handle it directly without invoking git/patch
-        if _is_v4a_patch(data.diff):
-            v4a = data.diff
-            # Extract update blocks
-            file_blocks: list[tuple[str, str]] = []  # (path, block_text)
-            cur_path: str | None = None
-            cur_lines: list[str] = []
-            in_patch = False
-            for line in v4a.splitlines():
-                if line.startswith("*** Begin Patch"):
-                    in_patch = True
-                    continue
-                if line.startswith("*** End Patch"):
-                    break
-                if in_patch and line.startswith("*** Update File:"):
-                    # flush previous
-                    if cur_path is not None:
-                        file_blocks.append((cur_path, "\n".join(cur_lines)))
-                    cur_path = line.split(":", 1)[1].strip()
-                    cur_lines = []
-                    continue
-                if in_patch and cur_path is not None:
-                    cur_lines.append(line)
-            if cur_path is not None:
-                file_blocks.append((cur_path, "\n".join(cur_lines)))
+        # Normalize diff path
+        dp_raw = str(data.diff_path).strip()
+        if dp_raw.startswith("/workspace/"):
+            rel_patch_path = dp_raw[len("/workspace/"):]
+        elif dp_raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; pass a workspace-relative 'diff_path'")
+        else:
+            rel_patch_path = dp_raw
 
-            def _apply_unified_hunks(original: str, hunk_text: str) -> tuple[bool, str]:
-                """Apply unified hunks to a single file content, tolerant of offsets.
-
-                Rules:
-                - Lines starting with ' ' are context: we seek forward from the current index to match and copy through.
-                - Lines starting with '-' are deletions: we seek forward to find the line and drop it.
-                - Lines starting with '+' are insertions: we insert at the current output position.
-                - '@@' resets hunk state; file-level headers inside block are ignored.
-                """
-                src = original.splitlines(keepends=False)
-                out: list[str] = []
-                i = 0  # index into src
-                in_hunk = False
-
-                def append_through(to_idx: int):
-                    nonlocal i
-                    if to_idx > i:
-                        out.extend(src[i:to_idx])
-                        i = to_idx
-
-                for raw in hunk_text.splitlines():
-                    if raw.startswith("@@"):
-                        in_hunk = True
-                        continue
-                    if not in_hunk:
-                        continue
-                    if raw.startswith("--- ") or raw.startswith("+++ "):
-                        continue
-                    if raw.startswith(" "):
-                        ctx = raw[1:]
-                        # find next occurrence of ctx at or after i
-                        j = i
-                        found = False
-                        while j < len(src):
-                            if src[j] == ctx:
-                                found = True
-                                break
-                            j += 1
-                        if not found:
-                            return False, original
-                        append_through(j + 1)
-                        out.append(ctx)
-                    elif raw.startswith("-") and not raw.startswith("--- "):
-                        old = raw[1:]
-                        j = i
-                        found = False
-                        while j < len(src):
-                            if src[j] == old:
-                                found = True
-                                break
-                            j += 1
-                        if not found:
-                            return False, original
-                        # copy up to just before j, then drop j and advance input
-                        append_through(j)
-                        i = j + 1
-                    elif raw.startswith("+") and not raw.startswith("+++ "):
-                        out.append(raw[1:])
-                    else:
-                        # ignore unknown
-                        pass
-                # copy remainder
-                out.extend(src[i:])
-                # preserve trailing newline if present
-                return True, "\n".join(out) + ("\n" if original.endswith("\n") else "")
-
-            applied = []
-            for rel_path, block in file_blocks:
-                target = rel_path.strip()
-                if target.startswith("/"):
-                    # Force workspace-relative
-                    target = target[1:]
-                rel = f"{base.rstrip('/')}/{target}" if base and base != "." else target
-                try:
-                    current = container_manager.read_workspace_file(rel, binary=False)
-                except Exception:
-                    current = ""
-                ok, new_content = _apply_unified_hunks(str(current), block)
-                if not ok:
-                    attempts.append({"strategy": "v4a", "exit_code": 2, "output": f"Failed to apply hunks for {rel}"})
-                    record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-                    return [TextContent(type="text", text=_json.dumps({
-                        "exit_code": 2,
-                        "output": f"Failed to apply hunks for {rel}",
-                        "strategy_used": "v4a",
-                        "attempts": attempts,
-                    }))]
-                container_manager.write_workspace_file(rel, new_content, append=False, executable=False)
-                applied.append(rel)
-            attempts.append({"strategy": "v4a", "exit_code": 0, "output": f"updated {len(applied)} files", "files": applied})
-            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({
-                "exit_code": 0,
-                "output": f"updated {len(applied)} files",
-                "strategy_used": "v4a",
-                "attempts": attempts,
-            }))]
-
-        # Otherwise proceed with Git-style a/b patching
-        patch_uid = uuid.uuid4().hex
-        rel_patch_path = f".agent/tmp_scripts/patch_{patch_uid}.diff"
-        container_manager.write_workspace_file(rel_patch_path, data.diff)
-
+        # Build commands that apply from the provided file
         def _run_git() -> tuple[int | None, str | None, bool]:
             reject_clause = " --reject" if data.reject else ""
             cmd = (
@@ -1844,7 +1755,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
             timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
             attempts.append({"strategy": "git", "timed_out": timed_out, "exit_code": code, "output": out})
-            # Return (code, out, done)
             if timed_out:
                 return None, None, True
             return code, out, code == 0
@@ -1867,7 +1777,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         if data.strategy == "git":
             gcode, gout, done = _run_git()
-            if gcode is None and gout is None and done:  # timed out
+            if gcode is None and gout is None and done:
                 record_tool_metric(name, int(__t.time()*1000) - __start_ms)
                 return [TextContent(type="text", text=_json.dumps({
                     "exit_code": None,
@@ -1879,13 +1789,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if done:
                 code, out = gcode, gout
             else:
-                # Heuristic fallback to patch when git reports format/validity issues
                 strategy_used = "patch"
                 code, out = _run_patch()
         else:
             code, out = _run_patch()
-
-        # No additional fallback beyond git/patch
 
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({
@@ -1894,7 +1801,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "strategy_used": strategy_used,
             "attempts": attempts,
             "patch_file": f"/workspace/{rel_patch_path}",
-            "hint": "If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. If it fails, pass strategy='patch' and strip=1 for diffs using 'a/' and 'b/' prefixes."
+            "hint": "If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. To create the patch file, use workspace_write_file and store it under .agent/diffs." 
         }))]
     elif name == "workspace_python_run_module":
         data = PythonRunModuleInput(**(arguments or {}))

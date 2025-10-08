@@ -9,11 +9,9 @@ class FakeContainerManager:
         self.files = {}
 
     def write_workspace_file(self, rel, content, **kwargs):
-        # Simulate writes to either temp patch file or regular workspace file
+        # Simulate writes to regular workspace files (not used by new flow, but kept for compatibility)
         self.writes[rel] = content
-        # If it's not a patch temp, persist to files map
-        if not rel.startswith('.agent/tmp_scripts/patch_'):
-            self.files[rel] = content
+        self.files[rel] = content
         return rel
 
     def execute_command(self, command: str, task_id: str, extra_env=None):
@@ -43,13 +41,15 @@ index e69de29..4b825dc 100644
 @@ -0,0 +1,1 @@
 +hello
 """
-        args = {"base_dir": ".", "diff": diff, "strategy": "git", "reject": True}
+        # New flow: write diff to .agent/diffs and pass diff_path
+        diff_rel = ".agent/diffs/example.diff"
+        fake.write_workspace_file(diff_rel, diff)
+        args = {"base_dir": ".", "diff_path": diff_rel, "strategy": "git", "reject": True}
         res = await server.call_tool("workspace_apply_patch", args)
         assert isinstance(res, list) and res
-        # The server should have written a temp patch file and built a git apply command
-        assert any(k.startswith(".agent/tmp_scripts/patch_") for k in fake.writes.keys())
+        # The server should build a git apply command using the provided diff_path
         cmd = fake.last_cmd
-        assert cmd.startswith("cd /workspace && cd -- '.' && git apply --reject --whitespace=nowarn '/workspace/.agent/tmp_scripts/patch_")
+        assert cmd.startswith("cd /workspace && cd -- '.' && git apply --reject --whitespace=nowarn '/workspace/.agent/diffs/")
         payload = json.loads(res[0].text)
         assert payload["exit_code"] == 0
         assert payload["output"] == "applied"
@@ -67,11 +67,13 @@ async def test_workspace_apply_patch_patch_strategy_with_strip(monkeypatch):
         server.container_manager = fake
         diff = """\
 --- a/src/file.txt\n+++ b/src/file.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"""
-        args = {"base_dir": "proj", "diff": diff, "strategy": "patch", "strip": 1}
+        diff_rel = ".agent/diffs/strip.diff"
+        fake.write_workspace_file(diff_rel, diff)
+        args = {"base_dir": "proj", "diff_path": diff_rel, "strategy": "patch", "strip": 1}
         res = await server.call_tool("workspace_apply_patch", args)
         assert isinstance(res, list) and res
         cmd = fake.last_cmd
-        assert cmd.startswith("cd /workspace && cd -- 'proj' && patch -p1 -s -i '/workspace/.agent/tmp_scripts/patch_")
+        assert cmd.startswith("cd /workspace && cd -- 'proj' && patch -p1 -s -i '/workspace/.agent/diffs/")
     finally:
         server.container_manager = orig_cm
 
@@ -103,7 +105,9 @@ async def test_workspace_apply_patch_fallback_to_patch(monkeypatch):
         server.container_manager = fake
         diff = """\
 --- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-old\n+new\n"""
-        res = await server.call_tool("workspace_apply_patch", {"base_dir": ".", "diff": diff, "strategy": "git", "strip": 1})
+        diff_rel = ".agent/diffs/fallback.diff"
+        fake.write_workspace_file(diff_rel, diff)
+        res = await server.call_tool("workspace_apply_patch", {"base_dir": ".", "diff_path": diff_rel, "strategy": "git", "strip": 1})
         payload = json.loads(res[0].text)
         assert payload["exit_code"] == 0
         assert payload["strategy_used"] in {"patch"}
