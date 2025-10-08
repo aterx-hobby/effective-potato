@@ -82,7 +82,9 @@ def test_export_script(tmp_path, monkeypatch):
 
     env = os.environ.copy()
     env["DEV_OPENWEB_URL"] = f"http://127.0.0.1:{port}"
+    env["DEV_OPENWEBAPI_URL"] = f"http://127.0.0.1:{port}"
     env["DEV_OPENWEB_KEY"] = "dummy"
+    env["DEV_OPENWEBAPI_KEY"] = "dummy"
     env["MODEL_NAME"] = "effective-potato"
     env["OUTPUT_DIR"] = str(tmp_path / "out")
 

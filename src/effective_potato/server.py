@@ -2052,18 +2052,22 @@ def initialize_server() -> None:
     except Exception as e:
         logger.warning(f"Workspace prune on startup failed: {e}")
 
-    # Start HTTP server for screenshots and future endpoints
-    from pathlib import Path
-    bind_ip, port, public_host = get_server_config()
-    http_app = create_http_app(Path(container_manager.workspace_dir))
-    server_obj, thread = start_http_server(http_app, bind_ip, port)
-
-    # Keep references for URL building
+    # Start HTTP server for screenshots and future endpoints (skip in review-only mode)
     global _http_thread, _http_server, _public_host, _public_port
-    _http_thread = thread
-    _http_server = server_obj
-    _public_host = public_host
-    _public_port = port
+    if not _is_review_only_mode():
+        from pathlib import Path
+        bind_ip, port, public_host = get_server_config()
+        http_app = create_http_app(Path(container_manager.workspace_dir))
+        server_obj, thread = start_http_server(http_app, bind_ip, port)
+        _http_thread = thread
+        _http_server = server_obj
+        _public_host = public_host
+        _public_port = port
+    else:
+        _http_thread = None
+        _http_server = None
+        _public_host = None
+        _public_port = None
 
     # Write a readiness file for review clients to detect safe startup
     try:
