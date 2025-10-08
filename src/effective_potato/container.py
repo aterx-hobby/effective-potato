@@ -92,7 +92,8 @@ class ContainerManager:
         self.client = docker.from_env()
         self.container: Optional[Container] = None
         self.container_id: Optional[str] = None
-        self.workspace_dir = Path(workspace_dir).absolute()
+        # Allow overriding the host workspace directory via environment variable
+        self.workspace_dir = Path(os.getenv("POTATO_WORKSPACE_DIR") or workspace_dir).absolute()
         self.env_file = Path(env_file).absolute()
         self.sample_env_file = Path(sample_env_file).absolute()
         # Allow overrides via args or environment to avoid conflicts (e.g., integration tests)

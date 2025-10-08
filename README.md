@@ -80,6 +80,15 @@ The server will:
 2. Start the container
 3. Listen for MCP tool requests via stdio
 
+Alternatively, you can launch via the helper script:
+
+```bash
+./mcp.sh                # read/write mode (builds venv+package if needed)
+POTATO_TOOLKIT=review ./mcp.sh   # review-only mode (no build; waits for readiness)
+```
+
+Review mode waits for the full server to write a readiness file at `workspace/.agent/potato_ready.json` and times out after 60 seconds by default. Override with `POTATO_REVIEW_WAIT_SECS`.
+
 ### MCP Configuration
 
 To use effective-potato with an MCP client (like Claude Desktop), add the following to your MCP settings:
@@ -99,6 +108,46 @@ To use effective-potato with an MCP client (like Claude Desktop), add the follow
 Replace `/path/to/effective-potato` with the actual path to your installation.
 
 An example configuration file is provided in `mcp-config.json`.
+
+#### Dual toolkits: read-write vs review-only
+
+You can run two MCP server entries that share the same Docker container but expose different toolkits:
+
+- Read-write: full toolset (default)
+- Review-only: read-only, prefixed with `review_` and gated via POTATO_TOOLKIT
+
+Example (client settings snippet):
+
+```json
+{
+  "mcpServers": {
+    "effective-potato": {
+      "command": "/path/to/effective-potato/venv/bin/effective-potato",
+      "args": [],
+      "cwd": "/path/to/effective-potato",
+      "env": {
+        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
+      },
+      "description": "Read/Write toolkit"
+    },
+    "effective-potato-review": {
+      "command": "/path/to/effective-potato/venv/bin/effective-potato",
+      "args": [],
+      "cwd": "/path/to/effective-potato",
+      "env": {
+        "POTATO_TOOLKIT": "review",
+        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
+      },
+      "description": "Review-only (read-only) toolkit"
+    }
+  }
+}
+```
+
+Notes:
+- Both entries set `POTATO_CONTAINER_NAME` to the same value so they share the same running container.
+- The review-only entry sets `POTATO_TOOLKIT=review` to expose only `review_*` tools; direct calls to base tools are rejected.
+- You can continue to use your own ~/.mcpo/config.json; adapt the above blocks to your paths.
 
 ### Available Tools
 
@@ -364,6 +413,16 @@ The `local/.env` file is loaded and validated at startup. Environment variables 
 If no `local/.env` file is present, a warning is printed on startup. See `local/sample.env` for the format.
 
 ### GitHub CLI Integration
+
+### Workspace location override
+
+By default, the host workspace directory is `./workspace` (relative to the repo). To override it, set:
+
+```bash
+export POTATO_WORKSPACE_DIR=/absolute/path/to/your/workspace
+```
+
+The server mounts this path at `/workspace` inside the container. The `mcp.sh` review mode also uses this variable to find the readiness file at `$POTATO_WORKSPACE_DIR/.agent/potato_ready.json`.
 
 To enable GitHub CLI tools (`list_repositories` and `clone_repository`), add your GitHub Personal Access Token to the `local/.env` file:
 

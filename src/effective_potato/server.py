@@ -3,6 +3,7 @@
 import logging
 import uuid
 from typing import Any
+import os
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -200,6 +201,34 @@ _http_thread = None
 _http_server = None
 _public_host = None
 _public_port = None
+
+# Read-only toolset exposure for code-review models
+# These base tool names are considered safe (no write/mutation of workspace state)
+READ_ONLY_BASE_TOOLS: set[str] = {
+    "workspace_git_status",
+    "workspace_git_diff",
+    "workspace_read_file",
+    "workspace_find",
+    "workspace_find_venvs",
+    "workspace_select_venv",
+    "workspace_list_repositories",
+    "workspace_task_status",
+    "workspace_task_output",
+    "workspace_task_list",
+    "workspace_file_digest",
+    # GitHub read-only metadata
+    "github_get_repository",
+}
+
+
+def _is_review_only_mode() -> bool:
+        """Return True when server should expose only read-only review toolkit.
+
+        Controlled by POTATO_TOOLKIT env var:
+            POTATO_TOOLKIT in { 'review', 'review-only', 'review_only' }
+        """
+        v = (os.getenv("POTATO_TOOLKIT", "") or "").strip().lower()
+        return v in {"review", "review-only", "review_only"}
 
 
 @app.list_tools()
@@ -599,12 +628,56 @@ async def list_tools() -> list[Tool]:
             ),
         ])
 
+    # Also expose a read-only "review_" toolset for code-review models.
+    # We duplicate schemas/descriptions from the corresponding base tools and mark them as read-only.
+    # Clients can gate to just these prefixed tools for non-mutating operations.
+    name_to_tool: dict[str, Tool] = {t.name: t for t in tools}
+    for base in sorted(READ_ONLY_BASE_TOOLS):
+        base_tool = name_to_tool.get(base)
+        if not base_tool:
+            # Base tool not available in this runtime (e.g., github_* when gh is missing)
+            continue
+        # Clone schema and add a vendor extension flag
+        schema = base_tool.inputSchema
+        try:
+            # Make a shallow copy to avoid mutating original
+            schema_copy = dict(schema) if isinstance(schema, dict) else schema
+            if isinstance(schema_copy, dict):
+                schema_copy = {**schema_copy, "x-readonly": True, "x-toolkit": "review"}
+        except Exception:
+            schema_copy = schema
+        tools.append(
+            Tool(
+                name=f"review_{base}",
+                description=f"[READ-ONLY] {base_tool.description}",
+                inputSchema=schema_copy,
+            )
+        )
+
+    # If in review-only mode, only expose the prefixed review toolkit
+    if _is_review_only_mode():
+        return [t for t in tools if t.name.startswith("review_")]
+
     return tools
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
+    # Support "review_"-prefixed tools by mapping to their base names with a strict whitelist.
+    review_mode = False
+    if isinstance(name, str) and name.startswith("review_"):
+        base = name[len("review_"):]
+        if base not in READ_ONLY_BASE_TOOLS:
+            raise ValueError(f"Review tool not allowed: {name}")
+        # Map to base for execution
+        name = base
+        review_mode = True
+
+    # In review-only mode, block direct calls to non-prefixed tools
+    if _is_review_only_mode() and not review_mode:
+        raise ValueError("This server is running in review-only mode; use review_*-prefixed tools only.")
+
     # Only require container_manager for tools that interact with the container
     container_required = name not in {"workspace_select_venv", "workspace_recommended_flow"}
     if container_required and not container_manager:
@@ -1948,14 +2021,30 @@ def initialize_server() -> None:
         else:
             container_manager = ContainerManager()
     # Build and start container (idempotent-ish for tests that inject a manager)
-    try:
-        container_manager.build_image()
-    except Exception as e:
-        logger.warning(f"Image build failed or skipped: {e}")
-    try:
-        container_manager.start_container()
-    except Exception as e:
-        logger.warning(f"Container start encountered an issue: {e}")
+    # In review-only mode, do not build or (re)start containers; require it to be running already.
+    if _is_review_only_mode():
+        try:
+            running = container_manager.is_container_running()
+        except Exception as e:
+            running = False
+            logger.warning(f"Container check failed in review-only mode: {e}")
+        if not running:
+            raise RuntimeError("Review-only mode requires an already running container. Start the full server first.")
+    else:
+        try:
+            container_manager.build_image()
+        except Exception as e:
+            logger.warning(f"Image build failed or skipped: {e}")
+        try:
+            ok = container_manager.ensure_container_alive()
+            if not ok:
+                # As a fallback, attempt a full start
+                try:
+                    container_manager.start_container()
+                except Exception as e2:
+                    logger.warning(f"Container start encountered an issue: {e2}")
+        except Exception as e:
+            logger.warning(f"Container ensure/start encountered an issue: {e}")
 
     # On startup, repair/cleanup the local tracked repos list by removing entries whose directories are missing
     try:
@@ -1975,6 +2064,23 @@ def initialize_server() -> None:
     _http_server = server_obj
     _public_host = public_host
     _public_port = port
+
+    # Write a readiness file for review clients to detect safe startup
+    try:
+        import json as _json, datetime as _dt
+        from pathlib import Path as _Path
+        state = {
+            "up": True,
+            "container_name": getattr(container_manager, "container_name", None),
+            "container_id": container_manager.get_container_id(),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(state, indent=2))
+        logger.info(f"Wrote readiness state: {p}")
+    except Exception as e:
+        logger.warning(f"Failed to write readiness state file: {e}")
 
     # Start a lightweight watchdog to keep the container alive
     import threading as _th

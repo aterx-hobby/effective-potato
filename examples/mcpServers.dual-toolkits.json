@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "effective-potato": {
+      "command": "${HOME}/effective-potato/mcp.sh",
+      "args": [],
+      "cwd": "${HOME}/effective-potato",
+      "env": {
+        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
+      },
+      "description": "effective-potato (read/write)"
+    },
+    "effective-potato-review": {
+      "command": "${HOME}/effective-potato/mcp.sh",
+      "args": [],
+      "cwd": "${HOME}/effective-potato",
+      "env": {
+        "POTATO_TOOLKIT": "review",
+        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
+      },
+      "description": "effective-potato (review-only)"
+    }
+  }
+}
