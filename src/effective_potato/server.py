@@ -145,6 +145,115 @@ def _schema(model: type[BaseModel]) -> dict:
 # ---------------------------
 # Exec helpers
 # ---------------------------
+def _would_git_init_workspace_root(command: str) -> bool:
+    """Heuristically detect if the provided shell command would execute
+    'git init' at the workspace root (/workspace).
+
+    We simulate a simple flow by splitting the command on ';' and '&&',
+    tracking a coarse current working directory. If we encounter a
+    'git init' while the simulated CWD is exactly '/workspace', we return True.
+
+    This is intentionally conservative and only aims to prevent the most
+    common destructive case like:
+      - cd /workspace && git init
+      - cd -- '/workspace'; git init
+    It allows 'git init' in subdirectories (e.g., cd /workspace && cd proj && git init).
+    """
+    try:
+        if not isinstance(command, str) or not command.strip():
+            return False
+        s = command.strip()
+        import re as _re, shlex as _sh
+        parts = [p.strip() for p in _re.split(r"\s*(?:&&|;)\s*", s) if p.strip()]
+        cwd: str | None = None
+
+        def _norm(p: str | None) -> str | None:
+            if not p:
+                return None
+            # Strip trailing '/.' which is equivalent to the directory itself
+            q = p.rstrip()
+            if q.endswith("/."):
+                q = q[:-2] or "/"
+            return q
+
+        for part in parts:
+            low = part.strip()
+            # Track cd commands to update simulated cwd
+            if low.startswith("cd ") or low.startswith("cd\t") or low.startswith("cd\n"):
+                rest = low[2:].strip()
+                if rest.startswith("--"):
+                    rest = rest[2:].strip()
+                if (rest.startswith("'") and rest.endswith("'")) or (rest.startswith('"') and rest.endswith('"')):
+                    rest = rest[1:-1]
+                if rest.startswith("/"):
+                    cwd = _norm(rest)
+                else:
+                    if cwd:
+                        base = cwd[:-1] if cwd.endswith("/") else cwd
+                        cwd = _norm(base + "/" + rest)
+                    else:
+                        cwd = _norm(rest)
+                continue
+
+            # Parse git invocations more precisely
+            try:
+                toks = _sh.split(low)
+            except Exception:
+                toks = low.split()
+            if not toks:
+                continue
+            if toks[0] != "git":
+                continue
+
+            # Find any -C <path> option and resolve it against cwd when relative
+            git_cwd: str | None = None
+            i = 1
+            while i < len(toks):
+                t = toks[i]
+                if t == "-C" and (i + 1) < len(toks):
+                    cpath = toks[i + 1]
+                    if cpath and not cpath.startswith("/") and cwd:
+                        base = cwd[:-1] if cwd.endswith("/") else cwd
+                        git_cwd = _norm(base + "/" + cpath)
+                    else:
+                        git_cwd = _norm(cpath)
+                    i += 2
+                    continue
+                i += 1
+
+            # Look for 'init' subcommand
+            if "init" in toks[1:]:
+                # Target directory argument (heuristic): token immediately after 'init' if present and not another option
+                try:
+                    init_idx = toks.index("init")
+                except ValueError:
+                    init_idx = -1
+                init_arg: str | None = None
+                if init_idx != -1 and (init_idx + 1) < len(toks):
+                    cand = toks[init_idx + 1]
+                    if not cand.startswith("-"):
+                        init_arg = cand
+
+                # Resolve init_arg to an absolute if possible
+                target_abs: str | None = None
+                if init_arg:
+                    if init_arg.startswith("/"):
+                        target_abs = _norm(init_arg)
+                    elif (init_arg in {".", "./"}) and (git_cwd or cwd):
+                        target_abs = _norm((git_cwd or cwd) or init_arg)
+                    elif (git_cwd or cwd) and not init_arg.startswith("-"):
+                        base = (git_cwd or cwd)
+                        base = base[:-1] if base and base.endswith("/") else base
+                        target_abs = _norm((base + "/" + init_arg) if base else init_arg)
+
+                # Decide the effective directory where init will act
+                effective_dir = target_abs or git_cwd or cwd
+                if effective_dir == "/workspace":
+                    return True
+        return False
+    except Exception:
+        return False
+
 def _exec_with_timeout(cmd: str, *, arguments: dict | None = None, extra_env: dict | None = None) -> tuple[bool, int | None, str]:
     """Run a container command with a default timeout.
 
@@ -591,6 +700,73 @@ async def list_tools() -> list[Tool]:
         )
     )
 
+    # Workspace: branch management and merges
+    tools.append(
+        Tool(
+            name="workspace_git_checkout",
+            description="Switch to an existing branch using 'git checkout <branch>'.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "branch": {"type": "string", "description": "Existing branch name to checkout"},
+                },
+                "required": ["repo_path", "branch"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_git_branch_create",
+            description="Create a new branch (optionally checkout) from the current HEAD or a start point.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "name": {"type": "string", "description": "Branch name to create"},
+                    "start_point": {"type": "string", "description": "Optional start point (commit or branch)"},
+                    "checkout": {"type": "boolean", "default": True, "description": "If true, checkout the branch after creating (uses checkout -b)"},
+                },
+                "required": ["repo_path", "name"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_git_branch_delete",
+            description="Delete a local branch (-d by default, -D with force=true).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "name": {"type": "string"},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "required": ["repo_path", "name"],
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_git_merge",
+            description=(
+                "Merge a source branch into a target branch. If target_branch is not provided, we detect 'main' or 'master' as upstream. "
+                "By default uses '--no-ff --no-edit'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "source_branch": {"type": "string"},
+                    "target_branch": {"type": "string", "description": "Upstream target (e.g., main or master)"},
+                    "no_ff": {"type": "boolean", "default": True},
+                    "no_edit": {"type": "boolean", "default": True},
+                },
+                "required": ["repo_path", "source_branch"],
+            },
+        )
+    )
+
     # GitHub tools (only if gh available)
     if container_manager and container_manager.is_github_available():
         tools.extend([
@@ -685,6 +861,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         command = arguments.get("command")
         if not command:
             raise ValueError("Command is required")
+
+        # Guard: prevent accidental repository initialization at workspace root
+        if _would_git_init_workspace_root(str(command)):
+            import json as _json
+            payload = {
+                "exit_code": 3,
+                "message": "Blocked: git init at workspace root is not allowed.",
+                "hint": "Initialize repositories inside a project subdirectory (e.g., /workspace/myproj). Use 'cd myproj && git init'.",
+                "blocked": True,
+            }
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps(payload))]
 
         # Generate unique task ID
         task_id = str(uuid.uuid4())
@@ -1806,7 +1994,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git push still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for slow networks or large pushes."}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, you can proceed to commit or push; otherwise surface the error succinctly."}))]
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": code,
+            "output": out,
+            "hint": "Required next step: make a commit. If exit_code is 0, immediately run workspace_git_commit with a clear, concise message summarizing what changed and why."
+        }))]
     elif name == "workspace_git_commit":
         repo_path = arguments.get("repo_path")
         message = arguments.get("message")
@@ -1882,6 +2074,112 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If pull succeeded, summarize changes. If conflicts, advise resolving and committing."}))]
+    elif name == "workspace_git_branch_create":
+        repo_path = arguments.get("repo_path")
+        bname = arguments.get("name")
+        start = (arguments.get("start_point") or "").strip()
+        checkout = bool(arguments.get("checkout", True))
+        if not repo_path or not bname:
+            raise ValueError("'repo_path' and 'name' are required")
+        bq = str(bname).replace("'", "'\\''")
+        start_clause = f" '{start.replace("'", "'\\''")}'" if start else ""
+        if checkout:
+            # git checkout -b <name> [start]
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+                f"git checkout -b '{bq}'{start_clause}"
+            )
+        else:
+            # git branch <name> [start]
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+                f"git branch '{bq}'{start_clause}"
+            )
+        import json as _json
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch create still running; increase timeout_seconds.", "hint": "If creating from a remote start point, ensure you have fetched first."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If created successfully, begin committing changes on this branch."}))]
+    elif name == "workspace_git_branch_delete":
+        repo_path = arguments.get("repo_path")
+        bname = arguments.get("name")
+        force = bool(arguments.get("force", False))
+        if not repo_path or not bname:
+            raise ValueError("'repo_path' and 'name' are required")
+        bq = str(bname).replace("'", "'\\''")
+        flag = "-D" if force else "-d"
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            f"git branch {flag} '{bq}'"
+        )
+        import json as _json
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch delete still running; increase timeout_seconds.", "hint": "Use force=true to delete an unmerged branch if you are certain."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If deletion succeeded, prune remote branches if needed and update any open PRs."}))]
+    elif name == "workspace_git_merge":
+        repo_path = arguments.get("repo_path")
+        source = arguments.get("source_branch")
+        target = (arguments.get("target_branch") or "").strip()
+        no_ff = bool(arguments.get("no_ff", True))
+        no_edit = bool(arguments.get("no_edit", True))
+        if not repo_path or not source:
+            raise ValueError("'repo_path' and 'source_branch' are required")
+        sq = str(source).replace("'", "'\\''")
+        tq = str(target).replace("'", "'\\''") if target else ""
+        # If target not provided, detect main/master; fallback to 'main' then 'master'
+        detect_cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            "git rev-parse --verify main >/dev/null 2>&1 && echo main || (git rev-parse --verify master >/dev/null 2>&1 && echo master || echo main)"
+        )
+        import json as _json
+        if not target:
+            t_to = container_manager.execute_command(detect_cmd, str(uuid.uuid4()))
+            try:
+                _code, _out = t_to
+            except Exception:
+                _code, _out = (0, "main")
+            target = (_out or "main").strip().splitlines()[0] if _out else "main"
+            tq = str(target).replace("'", "'\\''")
+        # Checkout target, merge source into target with options
+        merge_opts = (" --no-ff" if no_ff else "") + (" --no-edit" if no_edit else "")
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            f"git checkout '{tq}' && git merge{merge_opts} '{sq}'"
+        )
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git merge still running; increase timeout_seconds.", "hint": "Resolve conflicts if present, then commit the merge."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If merge succeeded, summarize the merged changes and consider pushing the updated target branch if approved."}))]
+    elif name == "workspace_git_checkout":
+        repo_path = arguments.get("repo_path")
+        branch = arguments.get("branch")
+        if not repo_path or not branch:
+            raise ValueError("'repo_path' and 'branch' are required")
+        bq = str(branch).replace("'", "'\\''")
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
+            f"git checkout '{bq}'"
+        )
+        import json as _json
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git checkout still running; increase timeout_seconds.", "hint": "Ensure the branch exists locally or fetch remote branches first."}))]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Switched branches. Remember to commit or stash any local changes before switching back if needed."}))]
     elif name == "github_get_repository":
         if not container_manager.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
