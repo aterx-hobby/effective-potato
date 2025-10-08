@@ -1941,11 +1941,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             u = 3
         files = arguments.get("paths") or []
         files_q = " ".join(["'" + str(p).replace("'", "'\\''") + "'" for p in files])
-        base = f"git diff{' --cached' if staged else ''}{' --name-only' if name_only else ''} -U {u}"
+        # Use --unified=N to bind the value with the option and add '--' before file paths
+        # to disambiguate files from revisions (prevents errors like: ambiguous argument '3').
+        base = f"git diff{' --cached' if staged else ''}{' --name-only' if name_only else ''} --unified={u}"
+        sep = " -- " if files_q else ""
         cmd = (
             "cd /workspace && "
             f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
-            f"{base}{(' ' + files_q) if files_q else ''}"
+            f"{base}{sep}{files_q}"
         )
         import json as _json
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)

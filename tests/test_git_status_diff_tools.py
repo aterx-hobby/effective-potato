@@ -42,7 +42,7 @@ async def test_workspace_git_diff_staged_name_only_with_paths(monkeypatch):
         )
         assert isinstance(res, list) and res
         cmd = fake.last_cmd
-        assert "cd /workspace && cd -- 'proj' && git diff --cached --name-only -U 0 'src/app.py' 'README.md'" in cmd
+        assert "cd /workspace && cd -- 'proj' && git diff --cached --name-only --unified=0 -- 'src/app.py' 'README.md'" in cmd
         payload = json.loads(res[0].text)
         assert payload["exit_code"] == 0
     finally:
