@@ -2069,22 +2069,50 @@ def initialize_server() -> None:
         _public_host = None
         _public_port = None
 
-    # Write a readiness file for review clients to detect safe startup
-    try:
-        import json as _json, datetime as _dt
-        from pathlib import Path as _Path
-        state = {
-            "up": True,
-            "container_name": getattr(container_manager, "container_name", None),
-            "container_id": container_manager.get_container_id(),
-            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        }
-        p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(_json.dumps(state, indent=2))
-        logger.info(f"Wrote readiness state: {p}")
-    except Exception as e:
-        logger.warning(f"Failed to write readiness state file: {e}")
+    # Write readiness file only in full (read/write) mode; review mode is read-only
+    if not _is_review_only_mode():
+        try:
+            import json as _json, datetime as _dt, os as _os
+            from pathlib import Path as _Path
+            now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            # Compose rich state including container and review sections
+            running = False
+            try:
+                running = bool(container_manager.is_container_running())
+            except Exception:
+                running = False
+            review_expected = (_os.getenv("POTATO_REVIEW_EXPECTED", "").strip().lower() in ("1", "true", "yes"))
+            state = {
+                "version": 1,
+                "timestamp": now,
+                "up": True,
+                "container": {
+                    "name": getattr(container_manager, "container_name", None),
+                    "id": container_manager.get_container_id(),
+                    "running": running,
+                },
+                "server": {
+                    "mode": "full",
+                    "pid": _os.getpid(),
+                    "http": {
+                        "host": _public_host,
+                        "port": _public_port,
+                        "enabled": _public_host is not None and _public_port is not None,
+                    },
+                },
+                # Review section is managed by the main server; review app does not write this file
+                "review": {
+                    "expected": review_expected,
+                    "writes_state": False,
+                    "status": "unknown",
+                },
+            }
+            p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_json.dumps(state, indent=2))
+            logger.info(f"Wrote readiness state: {p}")
+        except Exception as e:
+            logger.warning(f"Failed to write readiness state file: {e}")
 
     # Start a lightweight watchdog to keep the container alive
     import threading as _th
@@ -2114,6 +2142,37 @@ def initialize_server() -> None:
                 logger.debug(f"Watchdog error: {e}")
             _time.sleep(5)
     _th.Thread(target=_watchdog, daemon=True).start()
+
+    # In review-only mode, update readiness file minimally to reflect review runtime status
+    if _is_review_only_mode():
+        try:
+            import json as _json, datetime as _dt
+            from pathlib import Path as _Path
+            p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
+            if p.exists():
+                try:
+                    doc = _json.loads(p.read_text())
+                except Exception:
+                    doc = {}
+            else:
+                doc = {}
+            review = doc.get("review") if isinstance(doc, dict) else None
+            if not isinstance(review, dict):
+                review = {}
+            review.update({
+                "status": "running",
+                "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "pid": os.getpid(),
+            })
+            # Do not modify container or server sections in review mode
+            if isinstance(doc, dict):
+                doc["review"] = review
+            else:
+                doc = {"review": review}
+            p.write_text(_json.dumps(doc, indent=2))
+            logger.info(f"Updated readiness (review section) at: {p}")
+        except Exception as e:
+            logger.warning(f"Failed to update readiness review section: {e}")
 
     logger.info("Server initialized successfully")
 
