@@ -1,15 +1,16 @@
 """Docker container management for effective-potato."""
 
-import os
+import io
 import logging
+import os
 import re
 import sys
+import tarfile
 import time
 import uuid
+from os import PathLike
 from pathlib import Path
 from typing import Optional
-import tarfile
-import io
 
 import docker
 from docker.models.containers import Container
@@ -19,31 +20,31 @@ logger = logging.getLogger(__name__)
 
 def validate_and_load_env_file(env_file_path: Path) -> dict[str, str]:
     """Validate and load environment variables from a .env file.
-    
+
     Args:
-        env_file_path: Path to the .env file
-        
+    env_file_path: Path to the .env file
+
     Returns:
-        Dictionary of environment variable name -> value
-        
+    Dictionary of environment variable name -> value
+
     Raises:
         ValueError: If the file contains invalid content (not just env vars)
     """
-    env_vars = {}
-    
+    env_vars: dict[str, str] = {}
+
     if not env_file_path.exists():
         return env_vars
-    
+
     content = env_file_path.read_text()
     lines = content.strip().split('\n')
-    
+
     # Pattern for valid environment variable assignments
     # Allows: VAR=value, VAR="value", VAR='value', export VAR=value
     env_pattern = re.compile(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
-    
+
     for line_num, line in enumerate(lines, 1):
         line = line.strip()
-        
+
         # Skip empty lines and comments
         if not line or line.startswith('#'):
             continue
@@ -55,18 +56,18 @@ def validate_and_load_env_file(env_file_path: Path) -> dict[str, str]:
                 f"Invalid content in {env_file_path} at line {line_num}: '{line}'\n"
                 f"Only environment variable assignments are allowed (e.g., VAR=value)"
             )
-        
+
         var_name = match.group(1)
         var_value = match.group(2).strip()
-        
+
         # Remove surrounding quotes if present
         if var_value.startswith('"') and var_value.endswith('"'):
             var_value = var_value[1:-1]
         elif var_value.startswith("'") and var_value.endswith("'"):
             var_value = var_value[1:-1]
-        
+
         env_vars[var_name] = var_value
-    
+
     return env_vars
 
 
@@ -129,9 +130,9 @@ class ContainerManager:
         agent_dir = self.workspace_dir / ".agent"
         (agent_dir / "tmp_scripts").mkdir(parents=True, exist_ok=True)
         (agent_dir / "screenshots").mkdir(parents=True, exist_ok=True)
-        
+
         # Load and validate environment variables from .env file
-        self.env_vars = {}
+        self.env_vars: dict[str, str] = {}
         if self.env_file.exists():
             try:
                 self.env_vars = validate_and_load_env_file(self.env_file)
@@ -413,7 +414,7 @@ class ContainerManager:
         # Authenticate GitHub CLI if token is available (from local/.env or process env)
         if self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN"):
             self._authenticate_github()
-        
+
         return self.container
 
     def _setup_git_and_ssh(self) -> None:
@@ -649,7 +650,7 @@ class ContainerManager:
             base = f"diag_{ts}_{cid_short}"
 
             # Collect attrs
-            attrs = {}
+            attrs: dict[str, object] = {}
             try:
                 attrs = cont.attrs or {}
             except Exception:
@@ -676,7 +677,16 @@ class ContainerManager:
 
             # Write summary
             try:
-                state = (attrs or {}).get("State", {})
+                state_obj = (attrs or {}).get("State", {})
+                # help mypy: ensure mapping[str, object]
+                state: dict[str, object] = {}
+                try:
+                    if isinstance(state_obj, dict):
+                        state = {str(k): v for k, v in state_obj.items()}
+                    else:
+                        state = {}
+                except Exception:
+                    state = {}
                 lines = []
                 for k in [
                     "Status",
@@ -705,17 +715,17 @@ class ContainerManager:
                 # Filter by container name to be robust if id changed; Docker API events supports filters
                 # Low-level API for events streaming; use client.api.events for better control
                 events = self.client.api.events(filters={"container": [self.container_name]}, decode=True, since=since_iso)
-                ev_lines = []
+                ev_lines: list[str] = []
                 max_lines = 500
                 for ev in events:
                     try:
                         # Stop after a sensible number to avoid huge files
                         if len(ev_lines) >= max_lines:
                             break
-                        ts = ev.get("timeNano") or int(ev.get("time", 0)) * 1_000_000_000
+                        # Normalize timestamp if needed (not used directly; rely on ev['time'] field)
                         # Some events include Actor with Attributes; capture key fields
-                        actor = ev.get("Actor", {})
-                        attrs = actor.get("Attributes", {})
+                        actor = ev.get("Actor", {}) or {}
+                        attrs = actor.get("Attributes", {}) or {}
                         line = {
                             "status": ev.get("status"),
                             "id": ev.get("id"),
@@ -744,11 +754,11 @@ class ContainerManager:
         """Authenticate GitHub CLI with the token from environment variables."""
         if not self.container:
             raise RuntimeError("Container is not running")
-        
+
         token = self._env_get("GITHUB_PERSONAL_ACCESS_TOKEN") or ""
         if not token:
             return
-        
+
         logger.info("Authenticating GitHub CLI...")
 
         # Authenticate gh using the token with a timeout to avoid hangs
@@ -1332,8 +1342,10 @@ class ContainerManager:
                 continue
             meta = step_map.get(idx, {"type": stype})
             if stype in ("exec", "run", "command"):
-                out_p = Path(meta.get("out")) if meta.get("out") else None
-                code_p = Path(meta.get("code")) if meta.get("code") else None
+                out_raw = meta.get("out")
+                code_raw = meta.get("code")
+                out_p = Path(out_raw) if isinstance(out_raw, (str, PathLike)) else None
+                code_p = Path(code_raw) if isinstance(code_raw, (str, PathLike)) else None
                 out_txt = ""
                 code_val = None
                 try:
@@ -1466,7 +1478,8 @@ class ContainerManager:
         repos = self.load_tracked_repos()
         results: list[dict] = []
         for r in repos:
-            rel = r.get("path") or r.get("repo")
+            rel_any = r.get("path") or r.get("repo")
+            rel = str(rel_any) if rel_any is not None else ""
             try:
                 abs_path = self._resolve_workspace_path(rel)
             except Exception:

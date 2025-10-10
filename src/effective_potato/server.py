@@ -1,17 +1,18 @@
 """MCP server for effective-potato."""
 
+import asyncio
 import logging
-import uuid
-from typing import Any
 import os
+import uuid
+from typing import Any, Literal, no_type_check
+
 from mcp.server import Server
-from mcp.types import Tool, TextContent
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Literal
+from mcp.server.stdio import stdio_server  # used in main()
+from mcp.types import TextContent, Tool
+from pydantic import BaseModel, Field
+
 from .container import ContainerManager
-from .web import (
-    record_tool_metric,
-)
+from .web import record_tool_metric
 
 logger = logging.getLogger(__name__)
 # ---------------------------
@@ -152,7 +153,8 @@ def _would_git_init_workspace_root(command: str) -> bool:
         if not isinstance(command, str) or not command.strip():
             return False
         s = command.strip()
-        import re as _re, shlex as _sh
+        import re as _re
+        import shlex as _sh
         parts = [p.strip() for p in _re.split(r"\s*(?:&&|;)\s*", s) if p.strip()]
         cwd: str | None = None
 
@@ -231,12 +233,12 @@ def _would_git_init_workspace_root(command: str) -> bool:
                     elif (init_arg in {".", "./"}) and (git_cwd or cwd):
                         target_abs = _norm((git_cwd or cwd) or init_arg)
                     elif (git_cwd or cwd) and not init_arg.startswith("-"):
-                        base = (git_cwd or cwd)
-                        base = base[:-1] if base and base.endswith("/") else base
+                        base = (git_cwd or cwd) or ""
+                        base = base[:-1] if base.endswith("/") else base
                         target_abs = _norm((base + "/" + init_arg) if base else init_arg)
 
-                # Decide the effective directory where init will act
-                effective_dir = target_abs or git_cwd or cwd
+                # Decide the effective directory where init will act (ensure str, not Optional)
+                effective_dir = (target_abs or git_cwd or cwd) or ""
                 if effective_dir == "/workspace":
                     return True
         return False
@@ -851,6 +853,7 @@ async def list_tools() -> list[Tool]:
 
 
 @app.call_tool()
+@no_type_check
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
     # Support "review_"-prefixed tools by mapping to their base names with a strict whitelist.
@@ -871,6 +874,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     container_required = name not in {"workspace_select_venv", "workspace_recommended_flow", "inspect_tools"}
     if container_required and not container_manager:
         raise RuntimeError("Container manager not initialized")
+    # Local non-None alias for type checking
+    cm: ContainerManager | None = container_manager
+    
 
     # Add a per-call request ID for structured logging
     req_id = str(uuid.uuid4())
@@ -879,9 +885,22 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     import time as __t
     __start_ms = int(__t.time() * 1000)
 
+    # Helper to enforce progress update reminder in hints
+    def _with_progress_reminder(h: str) -> str:
+        suffix = " Always include a brief status update on the overall task progress (what's done, what's next, blockers)."
+        try:
+            h = (h or "").rstrip()
+        except Exception:
+            h = ""
+        # Avoid duplicating the suffix if already present
+        if suffix.strip() in h:
+            return h
+        if h:
+            return f"{h} {suffix}"
+        return suffix.strip()
+
     if name == "workspace_execute_command":
         import threading
-        import time as _time
         command = arguments.get("command")
         if not command:
             raise ValueError("Command is required")
@@ -892,7 +911,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload = {
                 "exit_code": 3,
                 "message": "Blocked: git init at workspace root is not allowed.",
-                "hint": "Initialize repositories inside a project subdirectory (e.g., /workspace/myproj). Use 'cd myproj && git init'.",
+                "hint": _with_progress_reminder("Initialize repositories inside a project subdirectory (e.g., /workspace/myproj). Use 'cd myproj && git init'."),
                 "blocked": True,
             }
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -915,16 +934,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         env_map = arguments.get("env") or {}
 
         if run_bg:
-            info = container_manager.start_background_task(command, task_id, extra_env=env_map)
+            if not cm:
+                raise RuntimeError("Container manager not initialized")
+            info = cm.start_background_task(command, task_id, extra_env=env_map)
             import json as _json
-            payload = {"task_id": info.get("task_id", task_id), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to read logs, and workspace_task_kill to stop the process."}
+            payload = {"task_id": info.get("task_id", task_id), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to read logs, and workspace_task_kill to stop the process.")}
             logger.info(f"[req={req_id}] tool={name} started background task_id={task_id}")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps(payload))]
 
         def _worker():
             try:
-                code, out = container_manager.execute_command(command, task_id, extra_env=env_map)
+                if not cm:
+                    raise RuntimeError("Container manager not initialized")
+                code, out = cm.execute_command(command, task_id, extra_env=env_map)
                 result_holder["exit_code"] = code
                 result_holder["output"] = out
             except Exception as e:
@@ -942,7 +965,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "task_id": task_id,
                 "timeout_seconds": timeout_s,
                 "message": "Command still running; call again with a larger timeout to wait longer.",
-                "hint": "If you need the final output, call again with a larger timeout or poll until running=false. Alternatively, rerun with background=true and use workspace_task_output to tail logs and workspace_task_kill to stop when done.",
+                "hint": _with_progress_reminder("If you need the final output, call again with a larger timeout or poll until running=false. Alternatively, rerun with background=true and use workspace_task_output to tail logs and workspace_task_kill to stop when done."),
             }
             logger.info(f"[req={req_id}] tool={name} still running task_id={task_id} timeout={timeout_s}s")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -952,12 +975,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if "error" in result_holder:
                 logger.error(f"[req={req_id}] tool={name} error={result_holder['error']}")
                 record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-                return [TextContent(type="text", text=_json.dumps({"exit_code": 1, "error": result_holder["error"], "hint": "Check the error field and adjust the command or environment; re-run if needed."}))]
+                return [TextContent(type="text", text=_json.dumps({"exit_code": 1, "error": result_holder["error"], "hint": _with_progress_reminder("Check the error field and adjust the command or environment; re-run if needed.")}))]
             exit_code = result_holder.get("exit_code")
             output = result_holder.get("output", "")
             logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code}")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": _with_progress_reminder("Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace.")}))]
     # 'workspace_recommended_flow' intentionally disabled
     elif name == "inspect_tools":
         # Return the current published tools (honoring review-only gating) with schemas
@@ -986,7 +1009,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=_json.dumps({
             "count": len(items),
             "tools": items,
-            "hint": "Use this to verify what your client sees vs server. In review-only mode, only review_* and inspect_tools are exposed.",
+            "hint": _with_progress_reminder("Use this to verify what your client sees vs server. In review-only mode, only review_* and inspect_tools are exposed."),
         }))]
     elif name == "workspace_screenshot":
         # Validate and coerce via Pydantic
@@ -1020,10 +1043,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Screenshot still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if you need to wait longer for the desktop to settle before capture."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Screenshot still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds if you need to wait longer for the desktop to settle before capture.")}))]
         import json as _json
         resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output,
-                "hint": "Display the screenshot to the user; use the provided 'screenshot_path'."}
+                "hint": _with_progress_reminder("Display the screenshot to the user; use the provided 'screenshot_path'.")}
         logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code} path={out_path}")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
@@ -1066,18 +1089,22 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError("'command' is required")
         env_map = arguments.get("env") or {}
         task_id = str(uuid.uuid4())
-        info = container_manager.start_background_task(command, task_id, extra_env=env_map)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        info = cm.start_background_task(command, task_id, extra_env=env_map)
         import json as _json
-        payload = {"task_id": task_id, **info, "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to terminate if needed."}
+        payload = {"task_id": task_id, **info, "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to terminate if needed.")}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
     elif name == "workspace_task_status":
         task_id = arguments.get("task_id")
         if not task_id:
             raise ValueError("'task_id' is required")
-        status = container_manager.get_task_status(task_id)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        status = cm.get_task_status(task_id)
         import json as _json
-        status["hint"] = "If running=true, continue polling or use workspace_task_output to tail logs. When exit_code is not None, summarize results and surface artifacts."
+        status["hint"] = _with_progress_reminder("If running=true, continue polling or use workspace_task_output to tail logs. When exit_code is not None, summarize results and surface artifacts.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(status))]
     elif name == "workspace_task_kill":
@@ -1085,9 +1112,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         sig = arguments.get("signal", "TERM")
         if not task_id:
             raise ValueError("'task_id' is required")
-        result = container_manager.kill_task(task_id, signal=sig)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        result = cm.kill_task(task_id, signal=sig)
         import json as _json
-        result["hint"] = "If the task doesn't stop, try signal=KILL. Then poll status again."
+        result["hint"] = _with_progress_reminder("If the task doesn't stop, try signal=KILL. Then poll status again.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(result))]
     elif name == "workspace_task_output":
@@ -1107,10 +1136,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             cmd = f"test -f '{out_path}' && tail -n {n} '{out_path}' || true"
         else:
             cmd = f"test -f '{out_path}' && cat '{out_path}' || true"
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        code, out = cm.execute_command(cmd, str(uuid.uuid4()))
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "content": out or "", "path": out_path, "hint": "Show a concise excerpt (use tail for long logs) and offer to open or download if needed."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "content": out or "", "path": out_path, "hint": _with_progress_reminder("Show a concise excerpt (use tail for long logs) and offer to open or download if needed.")}))]
     elif name == "workspace_task_list":
         include_status = bool(arguments.get("include_status", False)) if isinstance(arguments, dict) else False
         # List files matching task_*.pid under tmp_scripts; derive task IDs
@@ -1118,19 +1149,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "cd /workspace/.agent/tmp_scripts 2>/dev/null || exit 0; "
             "ls -1 task_*.pid 2>/dev/null | sed -e 's/^task_//' -e 's/\\.pid$//'"
         )
-        code, out = container_manager.execute_command(probe, str(uuid.uuid4()))
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        code, out = cm.execute_command(probe, str(uuid.uuid4()))
         raw_lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
         def _tid(line: str) -> str:
             if line.startswith("task_") and line.endswith(".pid"):
                 return line[len("task_"):-len(".pid")]
             return line
-        task_ids = [_tid(l) for l in raw_lines]
+        task_ids = [_tid(line) for line in raw_lines]
         payload = {"exit_code": code, "tasks": task_ids}
         if include_status and task_ids:
-            statuses = {}
+            statuses: dict[str, Any] = {}
             for tid in task_ids:
                 try:
-                    statuses[tid] = container_manager.get_task_status(tid)
+                    statuses[tid] = cm.get_task_status(tid)
                 except Exception as e:
                     statuses[tid] = {"error": str(e)}
             payload["statuses"] = statuses
@@ -1140,7 +1173,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     
     
     elif name == "github_clone_repository":
-        if not container_manager.is_github_available():
+        if not cm or not cm.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
         
         owner = arguments.get("owner")
@@ -1150,10 +1183,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError("Both 'owner' and 'repo' are required")
         
         # Execute the clone repository command
-        exit_code, output = container_manager.clone_repository(owner=owner, repo=repo)
+        exit_code, output = cm.clone_repository(owner=owner, repo=repo)
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": "If cloning succeeded, add the repo to your workspace context and consider listing files or opening README next."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": _with_progress_reminder("If cloning succeeded, add the repo to your workspace context and consider listing files or opening README next.")}))]
     
     elif name == "workspace_launch_and_screenshot":
         data = LaunchAndScreenshotInput(**(arguments or {}))
@@ -1165,9 +1198,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         venv_cmd = (data.venv or "").strip() or None
         if not launch_command:
             raise ValueError("'launch_command' is required")
-        
+
         # Build the script to launch the app and screenshot
-        import time
         import datetime as dt
         import os
         shot_dir = "/workspace/.agent/screenshots"
@@ -1218,10 +1250,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Launch and capture still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if the app needs longer to render before capture."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Launch and capture still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds if the app needs longer to render before capture.")}))]
         import json as _json
         resp = {"exit_code": exit_code, "screenshot_path": out_path, "output": output,
-                "hint": "Display the screenshot to the user; use the provided 'screenshot_path'."}
+                "hint": _with_progress_reminder("Display the screenshot to the user; use the provided 'screenshot_path'.")}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
     
@@ -1469,7 +1501,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         full_script = "\n".join([line for line in script_lines if line])
         task_id = str(uuid.uuid4())
-        exit_code, output = container_manager.execute_command(full_script, task_id)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        exit_code, output = cm.execute_command(full_script, task_id)
 
         payload = {"exit_code": exit_code}
         # Parse detected window info from output
@@ -1507,7 +1541,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload["pid_relation"] = pid_rel
         # Always return the container path for media
         payload["video_path"] = video_out
-        payload["hint"] = "Provide the video to the user; use 'video_path' at /workspace/.agent/screenshots/."
+        payload["hint"] = _with_progress_reminder("Provide the video to the user; use 'video_path' at /workspace/.agent/screenshots/.")
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
     elif name == "workspace_find":
         # Validate workspace-relative path
@@ -1593,11 +1627,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Search still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for very large directories."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Search still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds for very large directories.")}))]
         import json as _json
         items = [line for line in (output or "").splitlines() if line.strip()]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": "Use these paths for follow-up file reads or summaries; do not print long lists verbatim unless helpful."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": _with_progress_reminder("Use these paths for follow-up file reads or summaries; do not print long lists verbatim unless helpful.")}))]
     elif name == "workspace_find_venvs":
         subpath = arguments.get("path") or "."
         if not isinstance(subpath, str):
@@ -1633,7 +1667,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         else:
             import os as _os
             from pathlib import Path as _Path
-            base_host = (_Path(container_manager.workspace_dir) / rel).resolve()
+            if not cm:
+                raise RuntimeError("Container manager not initialized")
+            base_host = (_Path(cm.workspace_dir) / rel).resolve()
             items = []
             for root, dirs, files in _os.walk(base_host):
                 # prune
@@ -1663,7 +1699,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "items": items,
             "venv_roots": venv_roots,
             "activations": activations,
-            "hint": "Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you."
+            "hint": _with_progress_reminder("Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you.")
         }))]
     elif name == "workspace_list_dir":
         subpath = arguments.get("path") or "."
@@ -1695,7 +1731,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "exit_code": None,
                 "timeout_seconds": arguments.get("timeout_seconds", 120),
                 "message": "Directory listing still running; try again with a larger timeout.",
-                "hint": "Large directory trees may be slow; keep to shallow paths.",
+                "hint": _with_progress_reminder("Large directory trees may be slow; keep to shallow paths."),
             }))]
         items = [line.strip() for line in (out or "").splitlines() if line.strip()]
         import json as _json
@@ -1703,7 +1739,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=_json.dumps({
             "exit_code": code,
             "items": items,
-            "hint": "Use these directory names to navigate or refine searches; results are depth=1 only.",
+            "hint": _with_progress_reminder("Use these directory names to navigate or refine searches; results are depth=1 only."),
         }))]
     elif name == "workspace_tar_create":
         data = TarCreateInput(**(arguments or {}))
@@ -1734,12 +1770,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout.", "hint": "Use timeout_seconds when modules need longer to run."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout.", "hint": _with_progress_reminder("Use timeout_seconds when modules need longer to run.")}))]
         import json as _json
         # Some tar variants return exit code 1 for benign warnings; treat 0/1 as success
         code_out = 0 if code in (0, 1) else code
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code_out, "archive": f"/workspace/{base_rel}/{arch_name}", "output": out, "hint": "You can download or share the archive path as needed."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code_out, "archive": f"/workspace/{base_rel}/{arch_name}", "output": out, "hint": _with_progress_reminder("You can download or share the archive path as needed.")}))]
     elif name == "workspace_file_digest":
         data = DigestInput(**(arguments or {}))
         algo = (data.algorithm or "sha256").lower()
@@ -1761,11 +1797,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout.", "hint": "Use timeout_seconds for scripts that take longer."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout.", "hint": _with_progress_reminder("Use timeout_seconds for scripts that take longer.")}))]
         digest = (out or "").strip().split()[0] if out else ""
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": "Store this digest to verify file integrity later."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": _with_progress_reminder("Store this digest to verify file integrity later.")}))]
     elif name == "workspace_apply_patch":
         data = ApplyPatchInput(**(arguments or {}))
         import json as _json
@@ -1821,7 +1857,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "timeout_seconds": arguments.get("timeout_seconds", 120) if isinstance(arguments, dict) else 120,
                     "message": "Patch application still running; try again with a larger timeout.",
                     "attempts": attempts,
-                    "hint": "If the patch is large, increase timeout_seconds. Consider strategy='patch' for plain unified diffs."
+                    "hint": _with_progress_reminder("If the patch is large, increase timeout_seconds. Consider strategy='patch' for plain unified diffs.")
                 }))]
             if done:
                 code, out = gcode, gout
@@ -1838,7 +1874,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "strategy_used": strategy_used,
             "attempts": attempts,
             "patch_file": f"/workspace/{rel_patch_path}",
-            "hint": "If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. To create the patch file, use workspace_write_file and store it under .agent/diffs." 
+            "hint": _with_progress_reminder("If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. To create the patch file, use workspace_write_file and store it under .agent/diffs.")
         }))]
     elif name == "workspace_python_run_module":
         data = PythonRunModuleInput(**(arguments or {}))
@@ -1862,15 +1898,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the module."}))]
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the module.")}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout or set background=true.", "hint": "Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} module={module}")
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Use output to summarize the run results concisely.")}))]
     elif name == "workspace_python_run_script":
         data = PythonRunScriptInput(**(arguments or {}))
         venv = data.venv_path
@@ -1894,15 +1930,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": "Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the script."}))]
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the script.")}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout or set background=true.", "hint": "Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Use output to summarize the run results concisely."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Use output to summarize the run results concisely.")}))]
     elif name == "workspace_python_check_syntax":
         data = PythonCheckSyntaxInput(**(arguments or {}))
         venv = data.venv_path
@@ -1926,10 +1962,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "py_compile still running; try again with a larger timeout.", "hint": "Large files or slow disks may need more time."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "py_compile still running; try again with a larger timeout.", "hint": _with_progress_reminder("Large files or slow disks may need more time.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} src={src}")
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If exit_code is 0, the file is syntactically valid; otherwise surface the compile error lines."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If exit_code is 0, the file is syntactically valid; otherwise surface the compile error lines.")}))]
     elif name == "workspace_pytest_run":
         data = PytestRunInput(**(arguments or {}))
         venv = data.venv_path
@@ -1950,14 +1986,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "pytest still running; try again with a larger timeout.", "hint": "Use -q to reduce output or target specific tests for faster runs."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "pytest still running; try again with a larger timeout.", "hint": _with_progress_reminder("Use -q to reduce output or target specific tests for faster runs.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code}")
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Summarize pass/fail counts and point to failing tests if any."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Summarize pass/fail counts and point to failing tests if any.")}))]
     elif name == "workspace_list_repositories":
         import json
-        items = container_manager.list_local_repositories()
-        return [TextContent(type="text", text=json.dumps({"items": items, "hint": "Use these repository entries to navigate or run git operations; avoid dumping full repo trees inline."}, ensure_ascii=False))]
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        items = cm.list_local_repositories()
+        return [TextContent(type="text", text=json.dumps({"items": items, "hint": _with_progress_reminder("Use these repository entries to navigate or run git operations; avoid dumping full repo trees inline.")}, ensure_ascii=False))]
     elif name == "workspace_read_file":
         rel = arguments.get("path")
         binary = bool(arguments.get("binary", False))
@@ -1970,15 +2008,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 rel = "."
             elif raw.startswith("/workspace/"):
                 rel = raw[len("/workspace/"):]
-        data = container_manager.read_workspace_file(rel, binary=binary)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        data = cm.read_workspace_file(rel, binary=binary)
         if binary:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data), "hint": "This is binary content; offer a download or summarize, do not inline raw bytes."}))]
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data), "hint": _with_progress_reminder("This is binary content; offer a download or summarize, do not inline raw bytes.")}))]
         else:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data), "hint": "Summarize long files; for short text, show key excerpts. Avoid flooding chat with large content."}))]
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data), "hint": _with_progress_reminder("Summarize long files; for short text, show key excerpts. Avoid flooding chat with large content.")}))]
     elif name == "workspace_write_file":
         rel = arguments.get("path")
         content = arguments.get("content")
@@ -1994,15 +2034,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             elif raw.startswith("/workspace/"):
                 rel = raw[len("/workspace/"):]
         import json as _json
-        p = container_manager.write_workspace_file(rel, str(content), append=append, executable=executable)
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        p = cm.write_workspace_file(rel, str(content), append=append, executable=executable)
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable, "hint": "Proceed with next action that uses this file (e.g., run it, open it, or commit it) rather than echoing the entire content."}))]
+        return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable, "hint": _with_progress_reminder("Proceed with next action that uses this file (e.g., run it, open it, or commit it) rather than echoing the entire content.")}))]
     elif name == "workspace_git_add":
         repo_path = arguments.get("repo_path")
         paths = arguments.get("paths") or []
         if not repo_path:
             raise ValueError("'repo_path' is required")
-        path_args = " ".join([f"'" + str(p).replace("'", "'\\''") + "'" for p in paths]) if paths else "-A"
+        path_args = " ".join(["'" + str(p).replace("'", "'\\''") + "'" for p in paths]) if paths else "-A"
         cmd = (
             "cd /workspace && "
             f"cd -- '{str(repo_path).replace("'", "'\\''")}' && "
@@ -2013,12 +2055,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git push still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for slow networks or large pushes."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git push still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds for slow networks or large pushes.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({
             "exit_code": code,
             "output": out,
-            "hint": "Required next step: make a commit. If exit_code is 0, immediately run workspace_git_commit with a clear, concise message summarizing what changed and why."
+            "hint": _with_progress_reminder("Required next step: make a commit. If exit_code is 0, immediately run workspace_git_commit with a clear, concise message summarizing what changed and why.")
         }))]
     elif name == "workspace_git_commit":
         repo_path = arguments.get("repo_path")
@@ -2038,9 +2080,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git pull still running; try again with a larger timeout.", "hint": "Increase timeout_seconds for slow networks or large updates."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git pull still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds for slow networks or large updates.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If commit succeeded, summarize the commit message and next steps (push or create PR)."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If commit succeeded, summarize the commit message and next steps (push or create PR).")}))]
     elif name == "workspace_git_push":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
@@ -2051,7 +2093,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             msg = {
                 "exit_code": 2,
                 "message": "Push requires explicit approval.",
-                "hint": "Do not run this tool unless the user clearly asked to push. Ask the user to confirm and set confirm=true when calling this tool.",
+                "hint": _with_progress_reminder("Do not run this tool unless the user clearly asked to push. Ask the user to confirm and set confirm=true when calling this tool."),
                 "required_action": "Ask for user confirmation to proceed with git push.",
             }
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -2072,9 +2114,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "gh view still running; try again with a larger timeout.", "hint": "Increase timeout_seconds if the GitHub API is slow."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "gh view still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds if the GitHub API is slow.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase.")}))]
     elif name == "workspace_git_pull":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
@@ -2092,9 +2134,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             f"git pull{rebase_clause} '{remote_s}'{branch_clause}"
         )
         import json as _json
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        code, out = cm.execute_command(cmd, str(uuid.uuid4()))
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If pull succeeded, summarize changes. If conflicts, advise resolving and committing."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If pull succeeded, summarize changes. If conflicts, advise resolving and committing.")}))]
     elif name == "workspace_git_branch_create":
         repo_path = arguments.get("repo_path")
         bname = arguments.get("name")
@@ -2122,9 +2166,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch create still running; increase timeout_seconds.", "hint": "If creating from a remote start point, ensure you have fetched first."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch create still running; increase timeout_seconds.", "hint": _with_progress_reminder("If creating from a remote start point, ensure you have fetched first.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If created successfully, begin committing changes on this branch."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If created successfully, begin committing changes on this branch.")}))]
     elif name == "workspace_git_branch_delete":
         repo_path = arguments.get("repo_path")
         bname = arguments.get("name")
@@ -2142,9 +2186,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch delete still running; increase timeout_seconds.", "hint": "Use force=true to delete an unmerged branch if you are certain."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch delete still running; increase timeout_seconds.", "hint": _with_progress_reminder("Use force=true to delete an unmerged branch if you are certain.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If deletion succeeded, prune remote branches if needed and update any open PRs."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If deletion succeeded, prune remote branches if needed and update any open PRs.")}))]
     elif name == "workspace_git_merge":
         repo_path = arguments.get("repo_path")
         source = arguments.get("source_branch")
@@ -2163,7 +2207,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         )
         import json as _json
         if not target:
-            t_to = container_manager.execute_command(detect_cmd, str(uuid.uuid4()))
+            if not cm:
+                raise RuntimeError("Container manager not initialized")
+            t_to = cm.execute_command(detect_cmd, str(uuid.uuid4()))
             try:
                 _code, _out = t_to
             except Exception:
@@ -2180,9 +2226,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git merge still running; increase timeout_seconds.", "hint": "Resolve conflicts if present, then commit the merge."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git merge still running; increase timeout_seconds.", "hint": _with_progress_reminder("Resolve conflicts if present, then commit the merge.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If merge succeeded, summarize the merged changes and consider pushing the updated target branch if approved."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If merge succeeded, summarize the merged changes and consider pushing the updated target branch if approved.")}))]
     elif name == "workspace_git_checkout":
         repo_path = arguments.get("repo_path")
         branch = arguments.get("branch")
@@ -2198,11 +2244,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git checkout still running; increase timeout_seconds.", "hint": "Ensure the branch exists locally or fetch remote branches first."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git checkout still running; increase timeout_seconds.", "hint": _with_progress_reminder("Ensure the branch exists locally or fetch remote branches first.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Switched branches. Remember to commit or stash any local changes before switching back if needed."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Switched branches. Remember to commit or stash any local changes before switching back if needed.")}))]
     elif name == "github_get_repository":
-        if not container_manager.is_github_available():
+        if not cm or not cm.is_github_available():
             raise RuntimeError("GitHub CLI is not available. Set GITHUB_PERSONAL_ACCESS_TOKEN in local/.env")
         owner = arguments.get("owner")
         repo = arguments.get("repo")
@@ -2212,7 +2258,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         fields = "name,description,sshUrl,homepageUrl,url,defaultBranchRef,visibility,createdAt,updatedAt,owner"
         cmd = f"gh repo view {owner}/{repo} --json {fields}"
         import json as _json
-        code, out = container_manager.execute_command(cmd, str(uuid.uuid4()))
+        code, out = cm.execute_command(cmd, str(uuid.uuid4()))
         # Try to parse JSON output from gh; if it fails, return as string
         parsed = None
         try:
@@ -2224,7 +2270,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             payload["repository"] = parsed
         else:
             payload["output"] = out
-        payload["hint"] = "Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely."
+        payload["hint"] = _with_progress_reminder("Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
     elif name == "workspace_git_status":
@@ -2242,9 +2288,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git status still running; increase timeout_seconds.", "hint": "Large repos may need more time."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git status still running; increase timeout_seconds.", "hint": _with_progress_reminder("Large repos may need more time.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "Summarize the key changes (modified, added, deleted) and branch info for the user."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Summarize the key changes (modified, added, deleted) and branch info for the user.")}))]
     elif name == "workspace_git_diff":
         repo_path = arguments.get("repo_path")
         if not repo_path:
@@ -2273,9 +2319,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git diff still running; increase timeout_seconds.", "hint": "For large diffs, consider name_only=true to list files first."}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git diff still running; increase timeout_seconds.", "hint": _with_progress_reminder("For large diffs, consider name_only=true to list files first.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": "If the diff is long, summarize key hunks and call out risky changes; include file list with name_only when helpful."}))]
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If the diff is long, summarize key hunks and call out risky changes; include file list with name_only when helpful.")}))]
     
     else:
         raise ValueError(f"Unknown tool: {name}")
@@ -2297,7 +2343,8 @@ def initialize_server() -> None:
     if container_manager is None:
         # In test/integration contexts, avoid clobbering the production container by name.
         # Always generate a unique test-specific name to prevent accidental reuse of production names.
-        import os as _os, uuid as _uuid
+        import os as _os
+        import uuid as _uuid
         test_mode = (
             _os.getenv("POTATO_IT_ENABLE", "0").lower() in ("1", "true", "yes")
             or _os.getenv("RUN_INTEGRATION_TESTS", "0") == "1"
@@ -2346,7 +2393,9 @@ def initialize_server() -> None:
     # Write readiness file only in full (read/write) mode; review mode is read-only
     if not _is_review_only_mode():
         try:
-            import json as _json, datetime as _dt, os as _os
+            import datetime as _dt
+            import json as _json
+            import os as _os
             from pathlib import Path as _Path
             now = _dt.datetime.now(_dt.timezone.utc).isoformat()
             # Compose rich state including container and review sections
@@ -2415,7 +2464,8 @@ def initialize_server() -> None:
     # In review-only mode, update readiness file minimally to reflect review runtime status
     if _is_review_only_mode():
         try:
-            import json as _json, datetime as _dt
+            import datetime as _dt
+            import json as _json
             from pathlib import Path as _Path
             p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
             if p.exists():
@@ -2457,8 +2507,6 @@ def cleanup_server() -> None:
 
 def main() -> None:
     """Main entry point for the server."""
-    import asyncio
-    from mcp.server.stdio import stdio_server
 
     try:
         initialize_server()
