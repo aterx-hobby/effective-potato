@@ -69,6 +69,9 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - cat /sys/module/amdgpu/parameters/queue_preemption_timeout_ms
 - cat /sys/module/amdgpu/parameters/lockup_timeout
 
+- in /etc/default/grub set GRUB_CMDLINE_LINUX="amdgpu.dc=0"
+
+
 
 ## Included Packages
 
