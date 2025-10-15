@@ -14,13 +14,50 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - **Git & Patch Utilities**: Apply unified diffs and review git status/diffs safely
 
 
-## Olama Custom build instructions with rocm6.4.4
+## Ollama Custom build instructions with rocm6.4.4
 
 - cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-6.4.4 -DROCM_PATH=/opt/rocm-6.4.4
 - cmake --build --preset "ROCm 6" --parallel $(nproc)
 - sudo mkdir -p /opt/ollama && sudo chown -R $USER:$USER /opt/ollama
 - cmake --install build --component HIP --strip -v
 - CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
+
+## Ollama custom build instructions with rocm 7.0.2
+
+-    cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-7.0.2 -DROCM_PATH=/opt/rocm-7.0.2
+-    cmake --build --preset "ROCm 6 " --parallel $(nproc)
+-    sudo mkdir -p /opt/ollama && sudo chown -R $USER:$USER /opt/ollama
+-    cmake --install build --component HIP --strip -v
+-    CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
+
+# Ollama other install stuff
+
+- sudo mkdir -p /usr/share/ollama/.ollama/models
+- sudo adduser --system ollama
+- sudo addgroup --system ollama
+- sudo usermod ollama -G ollama
+- sudo chown ollama:ollama /usr/share/ollama/.ollama
+- sudo chown ollama:ollama /usr/share/ollama/.ollama/models
+
+# Ollama systemd service file
+
+    [Unit]
+    Description=Ollama Service
+    After=network-online.target
+    
+    [Service]
+    ExecStart=/opt/ollama/bin/ollama serve
+    User=ollama
+    Group=ollama
+    Restart=always
+    RestartSec=3
+    Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+    Environment="OLLAMA_HOST=0.0.0.0"
+    Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"
+    Environment="OLLAMA_LLM_LIBRARY=rocm"
+    
+    [Install]
+    WantedBy=default.target
 
 
 ## Prevent GPU hangs around 15 second mark on large models (gpt-oss:120b) 
