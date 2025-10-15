@@ -22,7 +22,7 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - cmake --install build --component HIP --strip -v
 - CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
 
-## Ollama custom build instructions with rocm 7.0.2 < this compiles but doesn't work, it looks like it worked if you did ^^ above, but it doesn't.
+## Ollama custom build instructions with rocm 7.0.2
 
 -    cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-7.0.2 -DROCM_PATH=/opt/rocm-7.0.2
 -    cmake --build --preset "ROCm 6" --parallel $(nproc)
@@ -41,9 +41,8 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 
 # Ollama systemd service file
 
-    [Unit]
-    Description=Ollama Service
-    After=network-online.target
+    [Unit] 
+    Description=Ollama Service After=network-online.target
     
     [Service]
     ExecStart=/opt/ollama/bin/ollama serve
@@ -54,10 +53,11 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
     Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
     Environment="OLLAMA_HOST=0.0.0.0"
     Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"
-    Environment="OLLAMA_LLM_LIBRARY=rocm"
+    Environment="OLLAMA_LIBRARY_PATH=/opt/ollama/lib/ollama:/opt/ollama/lib/ollama/rocm"
     
     [Install]
     WantedBy=default.target
+
 
 
 ## Prevent GPU hangs around 15 second mark on large models (gpt-oss:120b) 
