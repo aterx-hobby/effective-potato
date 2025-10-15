@@ -22,10 +22,10 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - cmake --install build --component HIP --strip -v
 - CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
 
-## Ollama custom build instructions with rocm 7.0.2
+## Ollama custom build instructions with rocm 7.0.2 < this compiles but doesn't work, it looks like it worked if you did ^^ above, but it doesn't.
 
 -    cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-7.0.2 -DROCM_PATH=/opt/rocm-7.0.2
--    cmake --build --preset "ROCm 6 " --parallel $(nproc)
+-    cmake --build --preset "ROCm 6" --parallel $(nproc)
 -    sudo mkdir -p /opt/ollama && sudo chown -R $USER:$USER /opt/ollama
 -    cmake --install build --component HIP --strip -v
 -    CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
