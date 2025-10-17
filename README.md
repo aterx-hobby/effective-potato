@@ -14,7 +14,7 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - **Git & Patch Utilities**: Apply unified diffs and review git status/diffs safely
 
 
-## Ollama Custom build instructions with rocm6.4.4
+## Ollama Custom build instructions with rocm6.4.4  (STABLE)
 
 - cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-6.4.4 -DROCM_PATH=/opt/rocm-6.4.4
 - cmake --build --preset "ROCm 6" --parallel $(nproc)
@@ -22,7 +22,7 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - cmake --install build --component HIP --strip -v
 - CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
 
-## Ollama custom build instructions with rocm 7.0.2
+## Ollama custom build instructions with rocm 7.0.2 (VERY BROKEN - 1 poor response slow token rate, follow ups crash).
 
 -    cmake --fresh --preset "ROCm 6" -DOLLAMA_RUNNER_DIR=rocm --install-prefix /opt/ollama -DCMAKE_PREFIX_PATH=/opt/rocm-7.0.2 -DROCM_PATH=/opt/rocm-7.0.2
 -    cmake --build --preset "ROCm 6" --parallel $(nproc)
