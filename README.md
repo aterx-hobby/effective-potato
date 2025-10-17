@@ -21,6 +21,7 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 - sudo mkdir -p /opt/ollama && sudo chown -R $USER:$USER /opt/ollama
 - cmake --install build --component HIP --strip -v
 - CGO_ENABLED=1 go build -trimpath -buildmode=pie -o /opt/ollama/bin/ollama .
+- cmake --install build --component CPU --strip -v #this will throw an error but it will install the rocm ggml lib I don't know why this fixes things.
 
 ## Ollama custom build instructions with rocm 7.0.2 (VERY BROKEN - 1 poor response slow token rate, follow ups crash).
 
