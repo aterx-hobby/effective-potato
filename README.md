@@ -1,3 +1,8 @@
+This is currently being refactored as an MCP server for Pochi, instead of being an MCP server that provides coding tools.
+It will be updated to only provide the sandbox'ed Ubuntu 24.04 environment, and remove some of the tools available that are already built in to Pochi.
+
+If you have no heard of pochi please check it out: https://github.com/TabbyML/pochi/
+
 # effective-potato!
 
 This project provides an MCP (Model Context Protocol) server that hosts a sandboxed Ubuntu 24.04 Docker container for secure command execution.
