@@ -177,5 +177,5 @@ Track progress here by setting Status to one of: not_started, in_progress, compl
 6) P1 – Integration Tests for Mocked Paths
 - Goal: For every existing unit test that uses mocked data/clients, add a corresponding fully unmocked integration test that runs against a live container image. Use a unique container name to avoid conflicts on shared hosts, isolate a temporary workspace, and mark with `@pytest.mark.integration`.
 - Status: in_progress
-- Coverage: Added integration tests for container lifecycle, workspace_find_venvs via the MCP server, and server watchdog auto-restart with diagnostics capture. Tests are gated by POTATO_IT_ENABLE=1 and use unique container names and a temporary workspace to avoid conflicts.
+- Coverage: Added integration tests for container lifecycle and server watchdog auto-restart with diagnostics capture. Tests are gated by POTATO_IT_ENABLE=1 and use unique container names and a temporary workspace to avoid conflicts.
 - Next: Add integration coverage for tar/digest utilities, Python runner tools (module/script), and GUI flows (screenshot/launch/record) where environment permits; consider an OpenWeb scripts end-to-end test.

@@ -1,8 +1,8 @@
 """Web/metrics utilities.
 
-Note: The project no longer runs an embedded HTTP server. This module
-retains only small helpers (metrics counters). URL builders and Flask
-app utilities have been removed.
+This module intentionally contains only lightweight, dependency-free helpers
+(currently: in-process metrics counters). The MCP server is hosted separately
+over Streamable HTTP.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
     "effective-potato": {
       "type": "streamable_http",
       "url": "http://127.0.0.1:8000/mcp",
-      "description": "Sandboxed Ubuntu 24.04 container for secure command execution (Streamable HTTP)"
+      "description": "effective-potato"
     }
   }
 }

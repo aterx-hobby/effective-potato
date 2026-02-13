@@ -15,7 +15,8 @@ from effective_potato.container import ContainerManager
 @pytest.mark.timeout(600)
 @pytest.mark.skipif(os.environ.get("POTATO_IT_ENABLE", "0") not in ("1", "true", "yes"), reason="Integration tests disabled. Set POTATO_IT_ENABLE=1 to run.")
 async def test_tar_and_digest_end_to_end():
-    # Set up a temporary workspace with a small project
+    # These file-centric tools were intentionally removed from the published MCP surface.
+    # This integration test now verifies they remain unpublished even with a live container.
     with tempfile.TemporaryDirectory(dir=str(Path.cwd())) as tmp:
         ws = Path(tmp) / "workspace"
         proj = ws / "proj"
@@ -47,29 +48,12 @@ async def test_tar_and_digest_end_to_end():
             cm.start_container()
             server.container_manager = cm
 
-            # Create a tar archive from the proj directory
-            res1 = await server.call_tool(
-                "workspace_tar_create",
-                {"base_dir": "proj", "items": ["."], "archive_name": "bundle.tgz"}
-            )
-            data1 = json.loads(res1[0].text)
-            assert data1.get("exit_code") == 0
-            archive_path = data1.get("archive")
-            assert archive_path and archive_path.endswith("/proj/bundle.tgz")
+            res = await server.call_tool("inspect_tools", {})
+            payload = json.loads(res[0].text)
+            names = {t["name"] for t in payload.get("tools", [])}
 
-            # Verify archive exists inside container
-            code, out = cm.execute_command("test -f /workspace/proj/bundle.tgz && echo OK", f"it_{uuid.uuid4()}")
-            assert code == 0 and "OK" in out
-
-            # Compute digest of the archive
-            res2 = await server.call_tool(
-                "workspace_file_digest",
-                {"path": "/workspace/proj/bundle.tgz", "algorithm": "sha256"}
-            )
-            data2 = json.loads(res2[0].text)
-            assert data2.get("exit_code") == 0
-            digest = data2.get("digest", "")
-            assert isinstance(digest, str) and len(digest) == 64  # sha256 hex length
+            assert "workspace_tar_create" not in names
+            assert "workspace_file_digest" not in names
         finally:
             try:
                 server.container_manager = orig_cm

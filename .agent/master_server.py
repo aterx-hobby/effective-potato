@@ -1,15 +1,13 @@
-"""MCP server for effective-potato.
+"""MCP server for effective-potato."""
 
-This server is hosted over MCP Streamable HTTP (Starlette/uvicorn), not stdio.
-"""
-
+import asyncio
 import logging
 import os
 import uuid
 from typing import Any, Literal, no_type_check
 
 from mcp.server import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.stdio import stdio_server  # used in main()
 from mcp.types import TextContent, Tool
 from pydantic import BaseModel, Field
 
@@ -17,21 +15,6 @@ from .container import ContainerManager
 from .web import record_tool_metric
 
 logger = logging.getLogger(__name__)
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)).strip())
-    except Exception:
-        return default
-
-
-def _env_str(name: str, default: str) -> str:
-    try:
-        v = os.getenv(name)
-        return (v if v is not None else default).strip() or default
-    except Exception:
-        return default
 # ---------------------------
 # Pydantic models (typed schemas)
 # ---------------------------
@@ -75,6 +58,29 @@ class TarCreateInput(BaseModel):
 class DigestInput(BaseModel):
     path: str = Field(description="Workspace-relative path to file to hash")
     algorithm: str = Field(default="sha256", description="Hash algorithm: sha256 or md5")
+
+def _is_v4a_patch(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    s = text.strip()
+    return ("*** Begin Patch" in s) and ("*** End Patch" in s) and ("*** Update File:" in s or "*** Add File:" in s or "*** Delete File:" in s)
+
+
+class ApplyPatchInput(BaseModel):
+    base_dir: str = Field(default=".", description="Workspace-relative directory to apply the patch in")
+    diff_path: str = Field(description="Workspace-relative path to a diff/patch file to apply (e.g., .agent/diffs/patch_123.diff)")
+    strategy: Literal["git", "patch"] = Field(
+        default="git",
+        description=(
+            "Apply using 'git apply' (default) or the 'patch' utility on the provided diff file."
+        ),
+    )
+    strip: int = Field(
+        default=1,
+        ge=0,
+        description="Path strip count for 'patch' (-pN). Ignored for 'git' strategy.",
+    )
+    reject: bool = Field(default=True, description="For 'git apply': if true, allow partial application and emit .rej hunks when supported")
 
 
 class LaunchAndScreenshotInput(BaseModel):
@@ -286,10 +292,33 @@ app = Server("effective-potato")
 # Container manager instance
 container_manager: ContainerManager | None = None
 
-"""Note: review-only mode and review_*-prefixed tools have been removed.
+# Read-only toolset exposure for code-review models
+# These base tool names are considered safe (no write/mutation of workspace state)
+READ_ONLY_BASE_TOOLS: set[str] = {
+    "workspace_git_status",
+    "workspace_git_diff",
+    "workspace_read_file",
+    "workspace_find",
+    "workspace_find_venvs",
+    "workspace_select_venv",
+    "workspace_list_repositories",
+    "workspace_task_status",
+    "workspace_task_output",
+    "workspace_task_list",
+    "workspace_file_digest",
+    # GitHub read-only metadata
+    "github_get_repository",
+}
 
-This server now exposes a single toolkit intended for coding agents.
-"""
+
+def _is_review_only_mode() -> bool:
+        """Return True when server should expose only read-only review toolkit.
+
+        Controlled by POTATO_TOOLKIT env var:
+            POTATO_TOOLKIT in { 'review', 'review-only', 'review_only' }
+        """
+        v = (os.getenv("POTATO_TOOLKIT", "") or "").strip().lower()
+        return v in {"review", "review-only", "review_only"}
 
 
 @app.list_tools()
@@ -477,9 +506,41 @@ async def list_tools() -> list[Tool]:
         )
     )
 
-    # NOTE: File search/review/edit tools are intentionally not exposed.
-    # Coding agents typically already provide these primitives (glob/list/read/search/write/applyDiff).
-    # Keep this server focused on container execution, git operations, and GUI automation.
+    # Workspace: search files (context) and venv roots
+    tools.append(
+        Tool(
+            name="workspace_find",
+            description=(
+                "Search the workspace or a subdirectory, pruning .git, .agent, and venv-like directories. Supports name glob and type filter."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "name": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["any", "a", "file", "f", "dir", "d"],
+                        "default": "any",
+                        "description": "Result filter: any|a (all entries), file|f (-type f), dir|d (-type d).",
+                    },
+                },
+            },
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_list_dir",
+            description="List immediate subdirectories (depth=1) under the given workspace-relative path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative directory to list (default: .)"},
+                },
+                "required": [],
+            },
+        )
+    )
     tools.append(
         Tool(
             name="workspace_select_venv",
@@ -495,12 +556,44 @@ async def list_tools() -> list[Tool]:
             },
         )
     )
-
     tools.append(
         Tool(
             name="workspace_find_venvs",
             description="Find virtualenv roots by matching *venv*/*_env* folders or bin/activate paths (prunes .git and .agent). Also returns 'venv_roots' and 'activations' with 'source <venv_root>/bin/activate' commands.",
             inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+        )
+    )
+
+    # (workspace_select_venv listed earlier)
+
+    # Workspace: read/write files
+    tools.append(
+        Tool(
+            name="workspace_read_file",
+            description="Read a file from the workspace",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative path"},
+                    "binary": {"type": "boolean", "default": False},
+                },
+                "required": ["path"],
+            },
+        )
+    )
+    # Workspace utilities: tar and digest
+    tools.append(
+        Tool(
+            name="workspace_tar_create",
+            description="Create a .tar.gz archive from workspace items under a base directory",
+            inputSchema=_schema(TarCreateInput),
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_file_digest",
+            description="Compute a file digest (sha256 or md5) for a workspace file",
+            inputSchema=_schema(DigestInput),
         )
     )
     # Introspection: return the published tool list with schemas
@@ -509,6 +602,33 @@ async def list_tools() -> list[Tool]:
             name="inspect_tools",
             description="Inspect the tools published by this server (names, descriptions, input schemas).",
             inputSchema={"type": "object", "properties": {}},
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_apply_patch",
+            description=(
+                "Apply a unified diff from a file using 'git apply' (default) or 'patch'. "
+                "First, write your diff to the workspace using workspace_write_file (recommended directory: .agent/diffs), then pass its path as 'diff_path'.\n\n"
+                "Notes: git apply uses the file as-is; 'patch' honors the 'strip' (-pN) value."
+            ),
+            inputSchema=_schema(ApplyPatchInput),
+        )
+    )
+    tools.append(
+        Tool(
+            name="workspace_write_file",
+            description="Write a file to the workspace",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative path"},
+                    "content": {"type": "string", "description": "Content to write (raw string)"},
+                    "append": {"type": "boolean", "default": False},
+                    "executable": {"type": "boolean", "default": False},
+                },
+                "required": ["path", "content"],
+            },
         )
     )
 
@@ -674,12 +794,7 @@ async def list_tools() -> list[Tool]:
     )
 
     # GitHub tools (only if gh available)
-    has_gh = False
-    try:
-        has_gh = bool(container_manager and getattr(container_manager, "is_github_available") and container_manager.is_github_available())
-    except Exception:
-        has_gh = False
-    if has_gh:
+    if container_manager and container_manager.is_github_available():
         tools.extend([
             Tool(
                 name="github_get_repository",
@@ -704,6 +819,36 @@ async def list_tools() -> list[Tool]:
             ),
         ])
 
+    # Also expose a read-only "review_" toolset for code-review models.
+    # We duplicate schemas/descriptions from the corresponding base tools and mark them as read-only.
+    # Clients can gate to just these prefixed tools for non-mutating operations.
+    name_to_tool: dict[str, Tool] = {t.name: t for t in tools}
+    for base in sorted(READ_ONLY_BASE_TOOLS):
+        base_tool = name_to_tool.get(base)
+        if not base_tool:
+            # Base tool not available in this runtime (e.g., github_* when gh is missing)
+            continue
+        # Clone schema and add a vendor extension flag
+        schema = base_tool.inputSchema
+        try:
+            # Make a shallow copy to avoid mutating original
+            schema_copy = dict(schema) if isinstance(schema, dict) else schema
+            if isinstance(schema_copy, dict):
+                schema_copy = {**schema_copy, "x-readonly": True, "x-toolkit": "review"}
+        except Exception:
+            schema_copy = schema
+        tools.append(
+            Tool(
+                name=f"review_{base}",
+                description=f"[READ-ONLY] {base_tool.description}",
+                inputSchema=schema_copy,
+            )
+        )
+
+    # If in review-only mode, only expose the prefixed review toolkit
+    if _is_review_only_mode():
+        return [t for t in tools if t.name.startswith("review_")]
+
     return tools
 
 
@@ -711,11 +856,19 @@ async def list_tools() -> list[Tool]:
 @no_type_check
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
-    # If a tool is not published, fail fast as "Unknown tool".
-    # This also avoids returning container initialization errors for callers probing tool availability.
-    published_names = {t.name for t in (await list_tools())}
-    if name not in published_names:
-        raise ValueError(f"Unknown tool: {name}")
+    # Support "review_"-prefixed tools by mapping to their base names with a strict whitelist.
+    review_mode = False
+    if isinstance(name, str) and name.startswith("review_"):
+        base = name[len("review_"):]
+        if base not in READ_ONLY_BASE_TOOLS:
+            raise ValueError(f"Review tool not allowed: {name}")
+        # Map to base for execution
+        name = base
+        review_mode = True
+
+    # In review-only mode, block direct calls to non-prefixed tools, except for diagnostics
+    if _is_review_only_mode() and not review_mode and name != "inspect_tools":
+        raise ValueError("This server is running in review-only mode; use review_*-prefixed tools only.")
 
     # Only require container_manager for tools that interact with the container
     container_required = name not in {"workspace_select_venv", "workspace_recommended_flow", "inspect_tools"}
@@ -830,7 +983,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": _with_progress_reminder("Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace.")}))]
     # 'workspace_recommended_flow' intentionally disabled
     elif name == "inspect_tools":
-        # Return the current published tools with schemas
+        # Return the current published tools (honoring review-only gating) with schemas
         all_tools = await list_tools()
         items = []
         for t in all_tools:
@@ -843,12 +996,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             except Exception:
                 # Fallback minimal entry
                 items.append({"name": getattr(t, "name", "unknown")})
+        # In review-only mode, list_tools() intentionally hides inspect_tools from publication,
+        # but the introspection payload should still include it for diagnostics.
+        if _is_review_only_mode() and not any(it.get("name") == "inspect_tools" for it in items):
+            items.append({
+                "name": "inspect_tools",
+                "description": "Inspect the tools published by this server (names, descriptions, input schemas).",
+                "inputSchema": {"type": "object", "properties": {}},
+            })
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({
             "count": len(items),
             "tools": items,
-            "hint": _with_progress_reminder("Use this to verify what your client sees vs server."),
+            "hint": _with_progress_reminder("Use this to verify what your client sees vs server. In review-only mode, only review_* and inspect_tools are exposed."),
         }))]
     elif name == "workspace_screenshot":
         # Validate and coerce via Pydantic
@@ -922,75 +1083,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload = {"best": best, "candidates": list(paths), "activate": activate}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
-    elif name == "workspace_find_venvs":
-        subpath = arguments.get("path") or "."
-        if not isinstance(subpath, str):
-            raise ValueError("'path' must be a string if provided")
-        raw = str(subpath).strip()
-        if raw == "/workspace":
-            rel = "."
-        elif raw.startswith("/workspace/"):
-            rel = raw[len("/workspace/"):]
-            if not rel:
-                rel = "."
-        elif raw.startswith("/"):
-            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
-        else:
-            rel = raw
-
-            # Search for venv roots: directories named like *venv* or *_env*, or subfolders containing bin/activate.
-            # Exclude .git but do NOT exclude venv-like directories.
-        # Build the container-side find command expected by unit tests
-        rel_esc = rel.replace("'", "'\\''")
-        find_cmd = (
-            "cd /workspace && "
-            f"cd -- '{rel_esc}' && "
-            "find . \\(-name .git -o -name .agent\\) -prune -o "
-            "\\( -type d \\( -name '*venv*' -o -name '*_env*' \\) -o -path '*/bin/activate' \\) -print"
-        )
-        task_id = str(uuid.uuid4())
-        timed_out, exit_code, output = _exec_with_timeout(find_cmd, arguments=arguments)
-        items: list[str]
-        # If the container-side find worked, use it; otherwise fallback to a host-side scan for robustness
-        if (not timed_out) and (exit_code == 0) and output and not output.strip().startswith("find:"):
-            items = [line for line in (output or "").splitlines() if line.strip()]
-        else:
-            import os as _os
-            from pathlib import Path as _Path
-            if not cm:
-                raise RuntimeError("Container manager not initialized")
-            base_host = (_Path(cm.workspace_dir) / rel).resolve()
-            items = []
-            for root, dirs, files in _os.walk(base_host):
-                # prune
-                dirs[:] = [d for d in dirs if d not in {".git", ".agent"}]
-                # rel path from base_host
-                rel_root = "." if _Path(root) == base_host else "./" + str(_Path(root).relative_to(base_host)).replace("\\", "/")
-                # venv-like directories
-                for d in dirs:
-                    if ("venv" in d) or ("_env" in d):
-                        items.append(f"{rel_root}/{d}")
-                # bin/activate file
-                act = _Path(root)/"bin"/"activate"
-                if act.exists():
-                    items.append(f"{rel_root}/bin/activate")
-            exit_code = 0
-        # Derive potential venv roots (if a bin/activate path was returned, strip the /bin/activate)
-        def _venv_root(p: str) -> str:
-            if p.endswith("/bin/activate"):
-                return p[: -len("/bin/activate")]
-            return p.rstrip("/")
-        venv_roots = sorted(set(_venv_root(it) for it in items))
-        activations = [f"source {root}/bin/activate" for root in venv_roots]
-        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        import json as _json
-        return [TextContent(type="text", text=_json.dumps({
-            "exit_code": exit_code,
-            "items": items,
-            "venv_roots": venv_roots,
-            "activations": activations,
-            "hint": _with_progress_reminder("Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you.")
-        }))]
     elif name == "workspace_task_start":
         command = arguments.get("command")
         if not command:
@@ -1451,6 +1543,339 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload["video_path"] = video_out
         payload["hint"] = _with_progress_reminder("Provide the video to the user; use 'video_path' at /workspace/.agent/screenshots/.")
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+    elif name == "workspace_find":
+        # Validate workspace-relative path
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        # Prevent absolute paths or traversal; resolve within workspace via container-side cd
+        # Build a safe command using bash to cd into /workspace and then into the relative path.
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+        # Options
+        name_pat = arguments.get("name")
+        ftype_raw = (arguments.get("type") or "any").lower()
+        # Accept shorthand aliases
+        if ftype_raw in {"a"}:
+            ftype = "any"
+        elif ftype_raw in {"f"}:
+            ftype = "file"
+        elif ftype_raw in {"d"}:
+            ftype = "dir"
+        else:
+            ftype = ftype_raw
+        type_clause = ""
+        if ftype == "file":
+            type_clause = "-type f"
+        elif ftype == "dir":
+            type_clause = "-type d"
+        # Build a name clause that supports substring matches and extension-trimming
+        name_clause = ""
+        if isinstance(name_pat, str) and name_pat:
+            raw_name = name_pat.strip()
+            # If the caller supplied explicit wildcards (e.g., *.py), honor it exactly
+            if any(ch in raw_name for ch in ["*", "?", "[", "]"]):
+                esc = raw_name.replace("'", "'\\''")
+                name_clause = f"-name '{esc}'"
+            else:
+                # Trim common single extension (e.g., snake.py -> snake) and do substring match
+                base_name = raw_name.rsplit(".", 1)[0] if "." in raw_name else raw_name
+                patterns: list[str] = []
+                if base_name:
+                    # Primary pattern: substring anywhere
+                    patterns.append(f"*{base_name}*")
+                # If the provided name had an extension, optionally also match the raw form
+                if base_name != raw_name:
+                    patterns.append(f"*{raw_name}*")
+                # Deduplicate while preserving order
+                seen = set()
+                uniq_patterns = []
+                for p in patterns:
+                    if p not in seen:
+                        seen.add(p)
+                        uniq_patterns.append(p)
+                if uniq_patterns:
+                    # Build grouped -name clauses: ( -name 'p1' -o -name 'p2' )
+                    parts = []
+                    for pat in uniq_patterns:
+                        esc = pat.replace("'", "'\\''")
+                        parts.append(f"-name '{esc}'")
+                    name_clause = "\\( " + " -o ".join(parts) + " \\)"
+
+        # find with escaped parentheses for prune rules: skip .git, .agent, *venv*, *_env*
+        prune = "\\( -name .git -o -name .agent -o -name '*venv*' -o -name '*_env*' \\) -prune"
+        # Combine filters for the non-pruned branch
+        filters = " ".join([c for c in [type_clause, name_clause] if c])
+        if filters:
+            filters = " " + filters
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel.replace("'", "'\\''")}' && "
+            f"find . -type d {prune} -o{filters} -print"
+        )
+        task_id = str(uuid.uuid4())
+        timed_out, exit_code, output = _exec_with_timeout(find_cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Search still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds for very large directories.")}))]
+        import json as _json
+        items = [line for line in (output or "").splitlines() if line.strip()]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "items": items, "hint": _with_progress_reminder("Use these paths for follow-up file reads or summaries; do not print long lists verbatim unless helpful.")}))]
+    elif name == "workspace_find_venvs":
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+
+            # Search for venv roots: directories named like *venv* or *_env*, or subfolders containing bin/activate.
+            # Exclude .git but do NOT exclude venv-like directories.
+        # Build the container-side find command expected by unit tests
+        rel_esc = rel.replace("'", "'\\''")
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel_esc}' && "
+            "find . \\(-name .git -o -name .agent\\) -prune -o "
+            "\\( -type d \\( -name '*venv*' -o -name '*_env*' \\) -o -path '*/bin/activate' \\) -print"
+        )
+        task_id = str(uuid.uuid4())
+        timed_out, exit_code, output = _exec_with_timeout(find_cmd, arguments=arguments)
+        items: list[str]
+        # If the container-side find worked, use it; otherwise fallback to a host-side scan for robustness
+        if (not timed_out) and (exit_code == 0) and output and not output.strip().startswith("find:"):
+            items = [line for line in (output or "").splitlines() if line.strip()]
+        else:
+            import os as _os
+            from pathlib import Path as _Path
+            if not cm:
+                raise RuntimeError("Container manager not initialized")
+            base_host = (_Path(cm.workspace_dir) / rel).resolve()
+            items = []
+            for root, dirs, files in _os.walk(base_host):
+                # prune
+                dirs[:] = [d for d in dirs if d not in {".git", ".agent"}]
+                # rel path from base_host
+                rel_root = "." if _Path(root) == base_host else "./" + str(_Path(root).relative_to(base_host)).replace("\\", "/")
+                # venv-like directories
+                for d in dirs:
+                    if ("venv" in d) or ("_env" in d):
+                        items.append(f"{rel_root}/{d}")
+                # bin/activate file
+                act = _Path(root)/"bin"/"activate"
+                if act.exists():
+                    items.append(f"{rel_root}/bin/activate")
+            exit_code = 0
+        # Derive potential venv roots (if a bin/activate path was returned, strip the /bin/activate)
+        def _venv_root(p: str) -> str:
+            if p.endswith("/bin/activate"):
+                return p[: -len("/bin/activate")]
+            return p.rstrip("/")
+        venv_roots = sorted(set(_venv_root(it) for it in items))
+        activations = [f"source {root}/bin/activate" for root in venv_roots]
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        import json as _json
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": exit_code,
+            "items": items,
+            "venv_roots": venv_roots,
+            "activations": activations,
+            "hint": _with_progress_reminder("Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you.")
+        }))]
+    elif name == "workspace_list_dir":
+        subpath = arguments.get("path") or "."
+        if not isinstance(subpath, str):
+            raise ValueError("'path' must be a string if provided")
+        raw = str(subpath).strip()
+        if raw == "/workspace":
+            rel = "."
+        elif raw.startswith("/workspace/"):
+            rel = raw[len("/workspace/"):]
+            if not rel:
+                rel = "."
+        elif raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; provide a workspace-relative path or one under /workspace")
+        else:
+            rel = raw
+        # Use find with maxdepth/mindepth to list only immediate directories, skipping .git and .agent
+        rel_esc = rel.replace("'", "'\\''")
+        find_cmd = (
+            "cd /workspace && "
+            f"cd -- '{rel_esc}' && "
+            "find . -mindepth 1 -maxdepth 1 -type d ! -name .git ! -name .agent -print"
+        )
+        timed_out, code, out = _exec_with_timeout(find_cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({
+                "exit_code": None,
+                "timeout_seconds": arguments.get("timeout_seconds", 120),
+                "message": "Directory listing still running; try again with a larger timeout.",
+                "hint": _with_progress_reminder("Large directory trees may be slow; keep to shallow paths."),
+            }))]
+        items = [line.strip() for line in (out or "").splitlines() if line.strip()]
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": code,
+            "items": items,
+            "hint": _with_progress_reminder("Use these directory names to navigate or refine searches; results are depth=1 only."),
+        }))]
+    elif name == "workspace_tar_create":
+        data = TarCreateInput(**(arguments or {}))
+        base = data.base_dir.strip() or "."
+        items = data.items
+        arch = data.archive_name
+        if not items:
+            raise ValueError("'items' must be a non-empty list of relative paths")
+        # Normalize base and construct tar command; ensure we stay under /workspace
+        def _norm_rel(p: str) -> str:
+            s = str(p).strip()
+            if s.startswith("/"):
+                raise ValueError("Absolute paths are not allowed; provide workspace-relative paths")
+            return s
+        base_rel = _norm_rel(base)
+        items_quoted = " ".join(["'" + _norm_rel(p).replace("'", "'\\''") + "'" for p in items])
+        import datetime as _dt
+        ts = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%S")
+        arch_name = arch or f"archive_{ts}.tar.gz"
+        arch_q = arch_name.replace("'", "'\\''")
+        # Exclude the archive itself and silence 'file changed as we read it' warnings to return exit code 0
+        # Keep option ordering so tests that assert prefix 'tar -czf' still pass.
+        cmd = (
+            "cd /workspace && "
+            f"cd -- '{base_rel.replace("'", "'\\''")}' && "
+            f"tar -czf '{arch_q}' --warning=no-file-changed --exclude '{arch_q}' {items_quoted}"
+        )
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout.", "hint": _with_progress_reminder("Use timeout_seconds when modules need longer to run.")}))]
+        import json as _json
+        # Some tar variants return exit code 1 for benign warnings; treat 0/1 as success
+        code_out = 0 if code in (0, 1) else code
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code_out, "archive": f"/workspace/{base_rel}/{arch_name}", "output": out, "hint": _with_progress_reminder("You can download or share the archive path as needed.")}))]
+    elif name == "workspace_file_digest":
+        data = DigestInput(**(arguments or {}))
+        algo = (data.algorithm or "sha256").lower()
+        if algo not in {"sha256", "md5"}:
+            raise ValueError("Unsupported algorithm; use 'sha256' or 'md5'")
+        path = data.path
+        if not path:
+            raise ValueError("'path' is required")
+        p = str(path).strip()
+        if p.startswith("/") and not p.startswith("/workspace/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed")
+        rel = p[len("/workspace/"):] if p.startswith("/workspace/") else p
+        rel_q = rel.replace("'", "'\\''")
+        bin_name = "sha256sum" if algo == "sha256" else "md5sum"
+        cmd = (
+            "cd /workspace && "
+            f"{bin_name} -- '{rel_q}' | awk '{{print $1}}'"
+        )
+        timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+        if timed_out:
+            import json as _json
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout.", "hint": _with_progress_reminder("Use timeout_seconds for scripts that take longer.")}))]
+        digest = (out or "").strip().split()[0] if out else ""
+        import json as _json
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"exit_code": code, "algorithm": algo, "digest": digest, "path": f"/workspace/{rel}", "hint": _with_progress_reminder("Store this digest to verify file integrity later.")}))]
+    elif name == "workspace_apply_patch":
+        data = ApplyPatchInput(**(arguments or {}))
+        import json as _json
+        base = (data.base_dir or ".").strip()
+        attempts: list[dict[str, Any]] = []
+        strategy_used = data.strategy
+
+        # Normalize diff path
+        dp_raw = str(data.diff_path).strip()
+        if dp_raw.startswith("/workspace/"):
+            rel_patch_path = dp_raw[len("/workspace/"):]
+        elif dp_raw.startswith("/"):
+            raise ValueError("Absolute paths outside /workspace are not allowed; pass a workspace-relative 'diff_path'")
+        else:
+            rel_patch_path = dp_raw
+
+        # Build commands that apply from the provided file
+        def _run_git() -> tuple[int | None, str | None, bool]:
+            reject_clause = " --reject" if data.reject else ""
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{base.replace("'", "'\\''")}' && "
+                f"git apply{reject_clause} --whitespace=nowarn '/workspace/{rel_patch_path.replace("'", "'\\''")}'"
+            )
+            timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+            attempts.append({"strategy": "git", "timed_out": timed_out, "exit_code": code, "output": out})
+            if timed_out:
+                return None, None, True
+            return code, out, code == 0
+
+        def _run_patch() -> tuple[int | None, str | None]:
+            pnum = max(0, int(data.strip or 0))
+            cmd = (
+                "cd /workspace && "
+                f"cd -- '{base.replace("'", "'\\''")}' && "
+                f"patch -p{pnum} -s -i '/workspace/{rel_patch_path.replace("'", "'\\''")}'"
+            ).strip()
+            timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
+            attempts.append({"strategy": "patch", "timed_out": timed_out, "exit_code": code, "output": out, "strip": pnum})
+            if timed_out:
+                return None, None
+            return code, out
+
+        code: int | None = None
+        out: str | None = None
+
+        if data.strategy == "git":
+            gcode, gout, done = _run_git()
+            if gcode is None and gout is None and done:
+                record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+                return [TextContent(type="text", text=_json.dumps({
+                    "exit_code": None,
+                    "timeout_seconds": arguments.get("timeout_seconds", 120) if isinstance(arguments, dict) else 120,
+                    "message": "Patch application still running; try again with a larger timeout.",
+                    "attempts": attempts,
+                    "hint": _with_progress_reminder("If the patch is large, increase timeout_seconds. Consider strategy='patch' for plain unified diffs.")
+                }))]
+            if done:
+                code, out = gcode, gout
+            else:
+                strategy_used = "patch"
+                code, out = _run_patch()
+        else:
+            code, out = _run_patch()
+
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({
+            "exit_code": code,
+            "output": out,
+            "strategy_used": strategy_used,
+            "attempts": attempts,
+            "patch_file": f"/workspace/{rel_patch_path}",
+            "hint": _with_progress_reminder("If exit_code is 0, follow up with workspace_git_add and workspace_git_commit to persist changes. To create the patch file, use workspace_write_file and store it under .agent/diffs.")
+        }))]
     elif name == "workspace_python_run_module":
         data = PythonRunModuleInput(**(arguments or {}))
         venv = data.venv_path
@@ -1571,6 +1996,49 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise RuntimeError("Container manager not initialized")
         items = cm.list_local_repositories()
         return [TextContent(type="text", text=json.dumps({"items": items, "hint": _with_progress_reminder("Use these repository entries to navigate or run git operations; avoid dumping full repo trees inline.")}, ensure_ascii=False))]
+    elif name == "workspace_read_file":
+        rel = arguments.get("path")
+        binary = bool(arguments.get("binary", False))
+        if not rel:
+            raise ValueError("'path' is required")
+        # Normalize absolute /workspace paths to relative
+        if isinstance(rel, str):
+            raw = rel.strip()
+            if raw == "/workspace":
+                rel = "."
+            elif raw.startswith("/workspace/"):
+                rel = raw[len("/workspace/"):]
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        data = cm.read_workspace_file(rel, binary=binary)
+        if binary:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": True, "length": len(data), "hint": _with_progress_reminder("This is binary content; offer a download or summarize, do not inline raw bytes.")}))]
+        else:
+            import json as _json
+            record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+            return [TextContent(type="text", text=_json.dumps({"path": rel, "binary": False, "content": str(data), "hint": _with_progress_reminder("Summarize long files; for short text, show key excerpts. Avoid flooding chat with large content.")}))]
+    elif name == "workspace_write_file":
+        rel = arguments.get("path")
+        content = arguments.get("content")
+        append = bool(arguments.get("append", False))
+        executable = bool(arguments.get("executable", False))
+        if not rel or content is None:
+            raise ValueError("'path' and 'content' are required")
+        # Normalize absolute /workspace paths to relative
+        if isinstance(rel, str):
+            raw = rel.strip()
+            if raw == "/workspace":
+                rel = "."
+            elif raw.startswith("/workspace/"):
+                rel = raw[len("/workspace/"):]
+        import json as _json
+        if not cm:
+            raise RuntimeError("Container manager not initialized")
+        p = cm.write_workspace_file(rel, str(content), append=append, executable=executable)
+        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
+        return [TextContent(type="text", text=_json.dumps({"path": rel, "absolute": str(p), "appended": append, "executable": executable, "hint": _with_progress_reminder("Proceed with next action that uses this file (e.g., run it, open it, or commit it) rather than echoing the entire content.")}))]
     elif name == "workspace_git_add":
         repo_path = arguments.get("repo_path")
         paths = arguments.get("paths") or []
@@ -1889,20 +2357,30 @@ def initialize_server() -> None:
         else:
             container_manager = ContainerManager()
     # Build and start container (idempotent-ish for tests that inject a manager)
-    try:
-        container_manager.build_image()
-    except Exception as e:
-        logger.warning(f"Image build failed or skipped: {e}")
-    try:
-        ok = container_manager.ensure_container_alive()
-        if not ok:
-            # As a fallback, attempt a full start
-            try:
-                container_manager.start_container()
-            except Exception as e2:
-                logger.warning(f"Container start encountered an issue: {e2}")
-    except Exception as e:
-        logger.warning(f"Container ensure/start encountered an issue: {e}")
+    # In review-only mode, do not build or (re)start containers; require it to be running already.
+    if _is_review_only_mode():
+        try:
+            running = container_manager.is_container_running()
+        except Exception as e:
+            running = False
+            logger.warning(f"Container check failed in review-only mode: {e}")
+        if not running:
+            raise RuntimeError("Review-only mode requires an already running container. Start the full server first.")
+    else:
+        try:
+            container_manager.build_image()
+        except Exception as e:
+            logger.warning(f"Image build failed or skipped: {e}")
+        try:
+            ok = container_manager.ensure_container_alive()
+            if not ok:
+                # As a fallback, attempt a full start
+                try:
+                    container_manager.start_container()
+                except Exception as e2:
+                    logger.warning(f"Container start encountered an issue: {e2}")
+        except Exception as e:
+            logger.warning(f"Container ensure/start encountered an issue: {e}")
 
     # On startup, repair/cleanup the local tracked repos list by removing entries whose directories are missing
     try:
@@ -1912,37 +2390,47 @@ def initialize_server() -> None:
 
     # HTTP server removed: artifacts are referenced by absolute container paths only
 
-    # Write readiness file for clients/diagnostics
-    try:
-        import datetime as _dt
-        import json as _json
-        import os as _os
-        from pathlib import Path as _Path
-        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
-        running = False
+    # Write readiness file only in full (read/write) mode; review mode is read-only
+    if not _is_review_only_mode():
         try:
-            running = bool(container_manager.is_container_running())
-        except Exception:
+            import datetime as _dt
+            import json as _json
+            import os as _os
+            from pathlib import Path as _Path
+            now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            # Compose rich state including container and review sections
             running = False
-        state = {
-            "version": 1,
-            "timestamp": now,
-            "up": True,
-            "container": {
-                "name": getattr(container_manager, "container_name", None),
-                "id": container_manager.get_container_id(),
-                "running": running,
-            },
-            "server": {
-                "pid": _os.getpid(),
-            },
-        }
-        p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(_json.dumps(state, indent=2))
-        logger.info(f"Wrote readiness state: {p}")
-    except Exception as e:
-        logger.warning(f"Failed to write readiness state file: {e}")
+            try:
+                running = bool(container_manager.is_container_running())
+            except Exception:
+                running = False
+            review_expected = (_os.getenv("POTATO_REVIEW_EXPECTED", "").strip().lower() in ("1", "true", "yes"))
+            state = {
+                "version": 1,
+                "timestamp": now,
+                "up": True,
+                "container": {
+                    "name": getattr(container_manager, "container_name", None),
+                    "id": container_manager.get_container_id(),
+                    "running": running,
+                },
+                "server": {
+                    "mode": "full",
+                    "pid": _os.getpid(),
+                },
+                # Review section is managed by the main server; review app does not write this file
+                "review": {
+                    "expected": review_expected,
+                    "writes_state": False,
+                    "status": "unknown",
+                },
+            }
+            p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_json.dumps(state, indent=2))
+            logger.info(f"Wrote readiness state: {p}")
+        except Exception as e:
+            logger.warning(f"Failed to write readiness state file: {e}")
 
     # Start a lightweight watchdog to keep the container alive
     import threading as _th
@@ -1973,6 +2461,38 @@ def initialize_server() -> None:
             _time.sleep(5)
     _th.Thread(target=_watchdog, daemon=True).start()
 
+    # In review-only mode, update readiness file minimally to reflect review runtime status
+    if _is_review_only_mode():
+        try:
+            import datetime as _dt
+            import json as _json
+            from pathlib import Path as _Path
+            p = _Path(container_manager.workspace_dir) / ".agent" / "potato_ready.json"
+            if p.exists():
+                try:
+                    doc = _json.loads(p.read_text())
+                except Exception:
+                    doc = {}
+            else:
+                doc = {}
+            review = doc.get("review") if isinstance(doc, dict) else None
+            if not isinstance(review, dict):
+                review = {}
+            review.update({
+                "status": "running",
+                "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "pid": os.getpid(),
+            })
+            # Do not modify container or server sections in review mode
+            if isinstance(doc, dict):
+                doc["review"] = review
+            else:
+                doc = {"review": review}
+            p.write_text(_json.dumps(doc, indent=2))
+            logger.info(f"Updated readiness (review section) at: {p}")
+        except Exception as e:
+            logger.warning(f"Failed to update readiness review section: {e}")
+
     logger.info("Server initialized successfully")
 
 
@@ -1988,48 +2508,19 @@ def cleanup_server() -> None:
 def main() -> None:
     """Main entry point for the server."""
 
-    import contextlib
-
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    import uvicorn
-
-    class _StreamableHTTPASGIApp:
-        def __init__(self, session_manager: StreamableHTTPSessionManager):
-            self._session_manager = session_manager
-
-        async def __call__(self, scope, receive, send) -> None:
-            await self._session_manager.handle_request(scope, receive, send)
-
-    def _create_starlette_app() -> Starlette:
-        session_manager = StreamableHTTPSessionManager(
-            app=app,
-            json_response=(_env_str("POTATO_MCP_JSON_RESPONSE", "0").lower() in ("1", "true", "yes")),
-            stateless=(_env_str("POTATO_MCP_STATELESS", "0").lower() in ("1", "true", "yes")),
-        )
-        mcp_path = _env_str("POTATO_MCP_PATH", "/mcp")
-        asgi = _StreamableHTTPASGIApp(session_manager)
-
-        @contextlib.asynccontextmanager
-        async def lifespan(_app: Starlette):
-            async with session_manager.run():
-                yield
-
-        return Starlette(routes=[Route(mcp_path, endpoint=asgi)], lifespan=lifespan)
-
     try:
         initialize_server()
 
-        host = _env_str("POTATO_HOST", "127.0.0.1")
-        port = _env_int("POTATO_PORT", 8000)
-        log_level = _env_str("POTATO_HTTP_LOG_LEVEL", "info").lower()
+        # Run the server
+        async def run():
+            async with stdio_server() as (read_stream, write_stream):
+                await app.run(
+                    read_stream,
+                    write_stream,
+                    app.create_initialization_options(),
+                )
 
-        uvicorn.run(
-            _create_starlette_app(),
-            host=host,
-            port=port,
-            log_level=log_level,
-        )
+        asyncio.run(run())
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     finally:

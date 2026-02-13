@@ -16,7 +16,7 @@ This project provides an MCP (Model Context Protocol) server that hosts a sandbo
 
 - **Typed Tool Schemas**: Many tools validate inputs with Pydantic and expose JSON Schema via list_tools
 - **Background Tasks**: Run long processes in the background and manage them with task tools
-- **Git & Patch Utilities**: Apply unified diffs and review git status/diffs safely
+- **Git Utilities**: Execute git commands and review git status/diffs
 
 
 ## Ollama Custom build instructions with rocm6.4.4  (STABLE)
@@ -125,28 +125,26 @@ effective-potato
 The server will:
 1. Build the Docker image (if not already built)
 2. Start the container
-3. Listen for MCP tool requests via stdio
+3. Host the MCP server over Streamable HTTP (default: `http://127.0.0.1:8000/mcp`)
 
 Alternatively, you can launch via the helper script:
 
 ```bash
-./mcp.sh                # read/write mode (builds venv+package if needed)
-POTATO_TOOLKIT=review ./mcp.sh   # review-only mode (no build; waits for readiness)
+./mcp.sh                # builds venv+package if needed
 ```
 
-Review mode waits for the full server to write a readiness file at `workspace/.agent/potato_ready.json` and times out after 60 seconds by default. Override with `POTATO_REVIEW_WAIT_SECS`.
+### MCP Configuration (Streamable HTTP)
 
-### MCP Configuration
+Start the server (in a terminal) and point your MCP client at its Streamable HTTP URL.
 
-To use effective-potato with an MCP client (like Claude Desktop), add the following to your MCP settings:
+To use effective-potato with an MCP client, add something like the following to your MCP settings:
 
 ```json
 {
   "mcpServers": {
     "effective-potato": {
-      "command": "/path/to/effective-potato/venv/bin/effective-potato",
-      "args": [],
-      "cwd": "/path/to/effective-potato"
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }
@@ -156,51 +154,13 @@ Replace `/path/to/effective-potato` with the actual path to your installation.
 
 An example configuration file is provided in `mcp-config.json`.
 
-#### Dual toolkits: read-write vs review-only
-
-You can run two MCP server entries that share the same Docker container but expose different toolkits:
-
-- Read-write: full toolset (default)
-- Review-only: read-only, prefixed with `review_` and gated via POTATO_TOOLKIT
-
-Example (client settings snippet):
-
-```json
-{
-  "mcpServers": {
-    "effective-potato": {
-      "command": "/path/to/effective-potato/venv/bin/effective-potato",
-      "args": [],
-      "cwd": "/path/to/effective-potato",
-      "env": {
-        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
-      },
-      "description": "Read/Write toolkit"
-    },
-    "effective-potato-review": {
-      "command": "/path/to/effective-potato/venv/bin/effective-potato",
-      "args": [],
-      "cwd": "/path/to/effective-potato",
-      "env": {
-        "POTATO_TOOLKIT": "review",
-        "POTATO_CONTAINER_NAME": "effective-potato-sandbox"
-      },
-      "description": "Review-only (read-only) toolkit"
-    }
-  }
-}
-```
-
-Notes:
-- Both entries set `POTATO_CONTAINER_NAME` to the same value so they share the same running container.
-- The review-only entry sets `POTATO_TOOLKIT=review` to expose only `review_*` tools; direct calls to base tools are rejected.
-- You can continue to use your own ~/.mcpo/config.json; adapt the above blocks to your paths.
-
 ### Available Tools
 
-### Typed tool inputs (schemas)
+### Tool schemas
 
-The following tools validate their inputs with Pydantic models and expose JSON Schemas via `list_tools`:
+All published tools expose JSON Schemas via `list_tools`.
+
+The following tools additionally validate/coerce inputs with Pydantic models:
 
 - workspace_screenshot
   - Inputs: { filename?: string, delay_seconds?: integer >= 0 }
@@ -216,6 +176,10 @@ The following tools validate their inputs with Pydantic models and expose JSON S
     }
   - Behavior: launches the app, waits, and captures a fullscreen PNG.
 
+- workspace_interact_and_record
+  - Inputs: { inputs: Array<{ key_sequence?: string, delay?: integer >= 0, type?: 'once'|'sleep'|'repeat' }>, launch_command?: string, venv?: string, duration_seconds?: integer >= 1, frame_interval_ms?: integer >= 10, output_basename?: string, working_dir?: string, env?: { [key: string]: string }, post_launch_delay_seconds?: integer >= 0 }
+  - Behavior: optionally launches an app, sends key sequences, and records a WebM into `/workspace/.agent/recordings/`. Returns `video_path` plus window/probe info.
+
 - workspace_python_run_module
   - Inputs: { venv_path: string (workspace-relative), module: string, args?: string[], background?: boolean }
   - Behavior: runs `python -m <module>` using `<venv_path>/bin/python` without activating the venv. If `background=true`, returns a task_id.
@@ -223,72 +187,52 @@ The following tools validate their inputs with Pydantic models and expose JSON S
 - workspace_python_run_script
   - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[], background?: boolean }
   - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv. If `background=true`, returns a task_id.
-- workspace_apply_patch
-  - Inputs: { base_dir?: string, diff: string (Git-style a/b unified diff), strategy?: 'git'|'patch' (default: 'git'), strip?: integer (must be 1), reject?: boolean }
-  - Behavior: writes the diff into the workspace and runs `git apply` (default) or `patch -p1`. Only Git-style diffs with headers `--- a/...` and `+++ b/...` are accepted. Returns attempts and the strategy used.
-  - Minimal example (valid a/b hunk):
-    ```diff
-    --- a/src/file.txt
-    +++ b/src/file.txt
-    @@ -1,1 +1,1 @@
-    -old
-    +new
-    ```
 
-- workspace_git_status
-  - Inputs: { repo_path: string, porcelain?: boolean (default: true) }
-  - Behavior: runs `git status` (porcelain mode for machine-friendly output by default).
+- workspace_python_check_syntax
+  - Inputs: { venv_path: string (workspace-relative), source_path: string (workspace-relative) }
+  - Behavior: runs `python -m py_compile <source_path>` using `<venv_path>/bin/python`.
 
-- workspace_git_diff
-  - Inputs: { repo_path: string, staged?: boolean, name_only?: boolean, unified?: integer, paths?: string[] }
-  - Behavior: runs `git diff` with options; set staged=true for `--cached`, name_only to list files.
+- workspace_pytest_run
+  - Inputs: { venv_path: string (workspace-relative), args?: string[] }
+  - Behavior: runs pytest using `<venv_path>/bin/python -m pytest`.
 
-- workspace_git_push (approval-gated)
-  - Inputs: { repo_path: string, remote?: string, branch?: string, set_upstream?: boolean, confirm?: boolean }
-  - Behavior: requires `confirm=true` and is marked with an x-needs-approval schema field. Returns an instructional error if confirm is not true.
+Other published tools (schemas are defined inline and exposed via `list_tools`):
 
-- workspace_task_start
-  - Inputs: { command: string, env?: { [k: string]: string } }
-  - Behavior: starts a background task and returns a task_id.
+- workspace_execute_command
+  - Inputs: { command: string, timeout_seconds?: integer, env?: { [k: string]: string }, background?: boolean }
+  - Behavior: runs an arbitrary bash command in the container. If `background=true`, returns a task id.
 
-- workspace_task_status
-  - Inputs: { task_id: string }
-  - Behavior: polls a background task; returns {running, exit_code} and details.
+- workspace_task_start / workspace_task_status / workspace_task_output / workspace_task_list / workspace_task_kill
+  - Behavior: manage background processes started in the container.
 
-- workspace_task_output
-  - Inputs: { task_id: string, tail?: number }
-  - Behavior: reads the log file of a background task; set tail to return only last N lines.
+- workspace_list_repositories
+  - Behavior: list git repos tracked in the workspace.
 
-- workspace_task_list
-  - Inputs: { include_status?: boolean }
-  - Behavior: lists known task IDs; can include per-task status.
+- workspace_select_venv
+  - Inputs: { paths: string[] }
+  - Behavior: select the best venv candidate and return an `activate` command.
 
-- workspace_task_kill
-  - Inputs: { task_id: string, signal?: string (default: TERM) }
-  - Behavior: sends a signal to terminate a background task.
+- workspace_find_venvs
+  - Inputs: { path?: string }
+  - Behavior: searches under `path` (workspace-relative) for venv roots (e.g. `.venv`, `venv`, `*_env*`, and `bin/activate`). Returns `venv_roots` and `activations` (e.g. `source <root>/bin/activate`).
 
+- inspect_tools
+  - Behavior: return the currently published tools and schemas.
 
-- workspace_tar_create
-  - Inputs: {
-      base_dir?: string (default: '.' workspace-relative),
-      items: string[] (files/dirs relative to base_dir),
-      archive_name?: string (default: `archive_<timestamp>.tar.gz`)
-    }
-  - Behavior: creates `base_dir/<archive_name>` as a `.tar.gz` from listed items.
+Git tools:
 
-- workspace_file_digest
-  - Inputs: { path: string (workspace-relative or /workspace/...), algorithm?: 'sha256' | 'md5' (default: 'sha256') }
-  - Behavior: computes the file digest using standard utilities.
+- workspace_git_add / workspace_git_commit / workspace_git_pull / workspace_git_push (approval-gated)
+- workspace_git_status / workspace_git_diff
+- workspace_git_checkout / workspace_git_branch_create / workspace_git_branch_delete / workspace_git_merge
 
-Additionally:
-- workspace_find
-  - Inputs: {
-      path?: string (workspace-relative, default: '.'),
-      name?: string (glob passed to find -name),
-      type?: 'any'|'a'|'file'|'f'|'dir'|'d' (default: 'any')
-    }
-  - Behavior: prunes .git, *venv*, *_env* directories; applies optional name and type filters.
-  - Aliases: 'a' => any, 'f' => file (-type f), 'd' => dir (-type d).
+GitHub tools (only if `gh` is available in the container):
+
+- github_get_repository
+- github_clone_repository
+
+Note: effective-potato intentionally does not publish general workspace file search/review/edit tools (glob/list/read/search/write/applyDiff).
+Coding agents typically already provide those primitives; this server focuses on container execution, git operations, and GUI automation. `workspace_find_venvs` is a special-case helper because other tools/workflows depend on quickly discovering venv roots.
+
 
 For an MCP client, you can inspect each tool’s JSON Schema from the `list_tools` response to validate arguments before calling.
 
@@ -349,14 +293,11 @@ List GitHub repositories for a user or the authenticated user. This tool is only
 Clone a GitHub repository into the workspace directory. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
 ### Git workflow helpers
 
-Beyond add/commit/pull/push, the server exposes tools to review and safely apply changes:
+Beyond add/commit/pull/push, the server exposes tools to review changes:
 
 - Review changes:
   - `workspace_git_status` — machine-friendly status (porcelain)
   - `workspace_git_diff` — pending or staged changes; use `name_only=true` for a quick file list
-
-- Apply diffs:
-  - `workspace_apply_patch` — try `git apply` first; if it fails, it falls back to `patch -pN`
 
 - Safety on push:
   - `workspace_git_push` is approval-gated; callers must set `confirm=true` and should obtain explicit user consent
@@ -434,22 +375,6 @@ And executes it as:
 ```bash
 docker exec $containerid$ /workspace/.agent/tmp_scripts/task_$taskid$.sh
 ```
-
-### Observability: Metrics
-
-When the server is running, a lightweight metrics endpoint is exposed:
-
-```
-GET http://<host>:<port>/metrics
-```
-
-It returns text (Prometheus exposition style) with:
-- effective_potato_up: process up flag (1/0)
-- effective_potato_requests_total: total tool requests processed
-- effective_potato_tool_calls_total{tool="<name>"}: per-tool call counts
-- effective_potato_tool_duration_ms_sum{tool="<name>"}: cumulative per-tool elapsed time (ms)
-
-You can scrape this endpoint or just curl it for quick inspection during development.
 
 ## Environment Configuration
 
