@@ -160,9 +160,9 @@ cp local/sample.env local/.env
 ## Development Mode Policy
 - This repository is currently in active development. We do not preserve legacy tool names or APIs during this phase.
 - Breaking changes are allowed and expected when they simplify the surface area or align with new conventions.
-- Prefer the workspace-prefixed naming for tools. For example:
+- Prefer the `potato_*` prefix for local tools. For example:
       - Multi-tool pipeline: DEPRECATED. Do not expose or use `potato_workspace_multi_tool_pipeline` (previously `potato_multi_tool_pipeline`). Invoke individual tools instead.
-   - Local workspace operations should start with `potato_workspace_*`.
+   - Local workspace operations should start with `potato_*`.
    - Remote GitHub operations should start with `github_*`.
    - Do not add backward-compatibility aliases during development; update callers/tests instead.
 

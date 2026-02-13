@@ -24,7 +24,7 @@ async def test_workspace_python_run_module_builds_command(monkeypatch):
             "module": "http.server",
             "args": ["--bind", "127.0.0.1", "--help"],
         }
-        res = await server.call_tool("workspace_python_run_module", args)
+        res = await server.call_tool("potato_python_run_module", args)
         assert isinstance(res, list) and res
         cmd = fake.calls[-1]["cmd"]
         assert cmd.startswith("/workspace/proj/.venv/bin/python -m http.server")
@@ -46,7 +46,7 @@ async def test_workspace_python_run_script_builds_command(monkeypatch):
             "script_path": "proj/app.py",
             "args": ["--version"],
         }
-        res = await server.call_tool("workspace_python_run_script", args)
+        res = await server.call_tool("potato_python_run_script", args)
         assert isinstance(res, list) and res
         cmd = fake.calls[-1]["cmd"]
         # Expect python path under the venv and absolute /workspace path for script

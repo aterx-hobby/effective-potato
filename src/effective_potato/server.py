@@ -300,7 +300,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: execute raw command (last resort)
     tools.append(
         Tool(
-            name="workspace_execute_command",
+            name="potato_execute_command",
             description=(
                 "Execute a bash command in the sandboxed container with an optional wait timeout."
             ),
@@ -326,7 +326,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: launch app and screenshot
     tools.append(
         Tool(
-            name="workspace_launch_and_screenshot",
+            name="potato_launch_and_screenshot",
             description=(
                 "Launch an app and then capture a fullscreen screenshot. Optionally accept 'venv' to activate before running the launch_command (useful for Python apps)."
             ),
@@ -337,7 +337,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: screenshot only (decoupled from launch)
     tools.append(
         Tool(
-            name="workspace_screenshot",
+            name="potato_screenshot",
             description=(
                 "Capture a fullscreen screenshot and save it under the workspace .agent/screenshots directory. "
                 "Do NOT launch or manage processes in a separate call immediately before this; use the combined launch tool or ensure the UI is ready. Default timeout: 120s (override with timeout_seconds)."
@@ -349,7 +349,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: interact and record
     tools.append(
         Tool(
-            name="workspace_interact_and_record",
+            name="potato_interact_and_record",
             description=(
                 "Optionally launch an app, perform light UI interactions, and record the desktop to a WebM file. "
                 "Pass 'venv' if you need to activate a Python environment before launch. You can also set working_dir and env. "
@@ -375,7 +375,7 @@ async def list_tools() -> list[Tool]:
     # Task lifecycle controls
     tools.append(
         Tool(
-            name="workspace_task_start",
+            name="potato_task_start",
             description="Start a long-running command in the background and get a task_id",
             inputSchema={
                 "type": "object",
@@ -389,7 +389,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_task_status",
+            name="potato_task_status",
             description="Poll task status by task_id",
             inputSchema={
                 "type": "object",
@@ -400,7 +400,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_task_output",
+            name="potato_task_output",
             description="Read or tail the output file of a background task (task_<id>.out)",
             inputSchema={
                 "type": "object",
@@ -414,7 +414,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_task_list",
+            name="potato_task_list",
             description="List known background task IDs; optionally include per-task status",
             inputSchema={
                 "type": "object",
@@ -424,7 +424,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_task_kill",
+            name="potato_task_kill",
             description="Terminate a task by task_id with a signal (default TERM)",
             inputSchema={
                 "type": "object",
@@ -437,14 +437,14 @@ async def list_tools() -> list[Tool]:
     # Python runner & venv selection
     tools.append(
         Tool(
-            name="workspace_python_run_module",
+            name="potato_python_run_module",
             description="Run 'python -m <module>' using a specified virtualenv without activating it.",
             inputSchema=_schema(PythonRunModuleInput),
         )
     )
     tools.append(
         Tool(
-            name="workspace_python_run_script",
+            name="potato_python_run_script",
             description="Run a Python script file using a specified virtualenv without activating it.",
             inputSchema=_schema(PythonRunScriptInput),
         )
@@ -453,14 +453,14 @@ async def list_tools() -> list[Tool]:
     # Python helpers: syntax check and pytest
     tools.append(
         Tool(
-            name="workspace_python_check_syntax",
+            name="potato_python_check_syntax",
             description="Activate a venv and run 'python -m py_compile <source_file>'.",
             inputSchema=_schema(PythonCheckSyntaxInput),
         )
     )
     tools.append(
         Tool(
-            name="workspace_pytest_run",
+            name="potato_pytest_run",
             description="Activate a venv and run pytest with optional arguments (e.g., -q tests).",
             inputSchema=_schema(PytestRunInput),
         )
@@ -471,7 +471,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: list tracked repos
     tools.append(
         Tool(
-            name="workspace_list_repositories",
+            name="potato_list_repositories",
             description="List repositories tracked in the workspace and whether their directories exist",
             inputSchema={"type": "object", "properties": {}},
         )
@@ -482,7 +482,7 @@ async def list_tools() -> list[Tool]:
     # Keep this server focused on container execution, git operations, and GUI automation.
     tools.append(
         Tool(
-            name="workspace_select_venv",
+            name="potato_select_venv",
             description=(
                 "Select the best virtualenv path from candidates using simple heuristics (.venv preferred, then venv, then *_env*, then env; tie-breakers by depth, then parent name length). Returns an 'activate' field with the exact command to activate it."
             ),
@@ -498,17 +498,9 @@ async def list_tools() -> list[Tool]:
 
     tools.append(
         Tool(
-            name="workspace_find_venvs",
+            name="potato_find_venvs",
             description="Find virtualenv roots by matching *venv*/*_env* folders or bin/activate paths (prunes .git and .agent). Also returns 'venv_roots' and 'activations' with 'source <venv_root>/bin/activate' commands.",
             inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
-        )
-    )
-    # Introspection: return the published tool list with schemas
-    tools.append(
-        Tool(
-            name="inspect_tools",
-            description="Inspect the tools published by this server (names, descriptions, input schemas).",
-            inputSchema={"type": "object", "properties": {}},
         )
     )
 
@@ -517,7 +509,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: basic git operations on a local repo
     tools.extend([
         Tool(
-            name="workspace_git_add",
+            name="potato_git_add",
             description="Run git add in a workspace repo",
             inputSchema={
                 "type": "object",
@@ -529,7 +521,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="workspace_git_commit",
+            name="potato_git_commit",
             description="Run git commit in a workspace repo",
             inputSchema={
                 "type": "object",
@@ -542,7 +534,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="workspace_git_push",
+            name="potato_git_push",
             description="Run git push in a workspace repo",
             inputSchema={
                 "type": "object",
@@ -558,7 +550,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="workspace_git_pull",
+            name="potato_git_pull",
             description="Run git pull in a workspace repo",
             inputSchema={
                 "type": "object",
@@ -576,7 +568,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: git status and diff for review
     tools.append(
         Tool(
-            name="workspace_git_status",
+            name="potato_git_status",
             description="Run git status (porcelain by default) in a workspace repo to list pending/staged changes",
             inputSchema={
                 "type": "object",
@@ -590,7 +582,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_git_diff",
+            name="potato_git_diff",
             description="Run git diff to show pending changes; set staged=true for staged diffs",
             inputSchema={
                 "type": "object",
@@ -609,7 +601,7 @@ async def list_tools() -> list[Tool]:
     # Workspace: branch management and merges
     tools.append(
         Tool(
-            name="workspace_git_checkout",
+            name="potato_git_checkout",
             description="Switch to an existing branch using 'git checkout <branch>'.",
             inputSchema={
                 "type": "object",
@@ -623,7 +615,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_git_branch_create",
+            name="potato_git_branch_create",
             description="Create a new branch (optionally checkout) from the current HEAD or a start point.",
             inputSchema={
                 "type": "object",
@@ -639,7 +631,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_git_branch_delete",
+            name="potato_git_branch_delete",
             description="Delete a local branch (-d by default, -D with force=true).",
             inputSchema={
                 "type": "object",
@@ -654,7 +646,7 @@ async def list_tools() -> list[Tool]:
     )
     tools.append(
         Tool(
-            name="workspace_git_merge",
+            name="potato_git_merge",
             description=(
                 "Merge a source branch into a target branch. If target_branch is not provided, we detect 'main' or 'master' as upstream. "
                 "By default uses '--no-ff --no-edit'."
@@ -718,7 +710,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         raise ValueError(f"Unknown tool: {name}")
 
     # Only require container_manager for tools that interact with the container
-    container_required = name not in {"workspace_select_venv", "workspace_recommended_flow", "inspect_tools"}
+    container_required = name not in {"potato_select_venv"}
     if container_required and not container_manager:
         raise RuntimeError("Container manager not initialized")
     # Local non-None alias for type checking
@@ -746,7 +738,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return f"{h} {suffix}"
         return suffix.strip()
 
-    if name == "workspace_execute_command":
+    if name == "potato_execute_command":
         import threading
         command = arguments.get("command")
         if not command:
@@ -785,7 +777,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 raise RuntimeError("Container manager not initialized")
             info = cm.start_background_task(command, task_id, extra_env=env_map)
             import json as _json
-            payload = {"task_id": info.get("task_id", task_id), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to read logs, and workspace_task_kill to stop the process.")}
+            payload = {"task_id": info.get("task_id", task_id), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use potato_task_status to poll, potato_task_output to read logs, and potato_task_kill to stop the process.")}
             logger.info(f"[req={req_id}] tool={name} started background task_id={task_id}")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps(payload))]
@@ -812,7 +804,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "task_id": task_id,
                 "timeout_seconds": timeout_s,
                 "message": "Command still running; call again with a larger timeout to wait longer.",
-                "hint": _with_progress_reminder("If you need the final output, call again with a larger timeout or poll until running=false. Alternatively, rerun with background=true and use workspace_task_output to tail logs and workspace_task_kill to stop when done."),
+                "hint": _with_progress_reminder("If you need the final output, call again with a larger timeout or poll until running=false. Alternatively, rerun with background=true and use potato_task_output to tail logs and potato_task_kill to stop when done."),
             }
             logger.info(f"[req={req_id}] tool={name} still running task_id={task_id} timeout={timeout_s}s")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
@@ -828,29 +820,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code}")
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
             return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": _with_progress_reminder("Parse and surface the command output to the user only if relevant; otherwise keep it in the tool trace.")}))]
-    # 'workspace_recommended_flow' intentionally disabled
-    elif name == "inspect_tools":
-        # Return the current published tools with schemas
-        all_tools = await list_tools()
-        items = []
-        for t in all_tools:
-            try:
-                items.append({
-                    "name": t.name,
-                    "description": t.description,
-                    "inputSchema": t.inputSchema,
-                })
-            except Exception:
-                # Fallback minimal entry
-                items.append({"name": getattr(t, "name", "unknown")})
-        import json as _json
-        record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-        return [TextContent(type="text", text=_json.dumps({
-            "count": len(items),
-            "tools": items,
-            "hint": _with_progress_reminder("Use this to verify what your client sees vs server."),
-        }))]
-    elif name == "workspace_screenshot":
+    # 'potato_recommended_flow' intentionally disabled
+    elif name == "potato_screenshot":
         # Validate and coerce via Pydantic
         parsed = ScreenshotInput(**(arguments or {}))
         import datetime as dt
@@ -889,7 +860,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         logger.info(f"[req={req_id}] tool={name} completed exit_code={exit_code} path={out_path}")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(resp))]
-    elif name == "workspace_select_venv":
+    elif name == "potato_select_venv":
         import json as _json
         paths = arguments.get("paths") or []
         if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
@@ -922,7 +893,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload = {"best": best, "candidates": list(paths), "activate": activate}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
-    elif name == "workspace_find_venvs":
+    elif name == "potato_find_venvs":
         subpath = arguments.get("path") or "."
         if not isinstance(subpath, str):
             raise ValueError("'path' must be a string if provided")
@@ -989,9 +960,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "items": items,
             "venv_roots": venv_roots,
             "activations": activations,
-            "hint": _with_progress_reminder("Chain these: (1) pass venv_roots (or items) to workspace_select_venv to get 'activate'; (2) provide that string as 'venv' to workspace_launch_and_screenshot or workspace_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you.")
+            "hint": _with_progress_reminder("Chain these: (1) pass venv_roots (or items) to potato_select_venv to get 'activate'; (2) provide that string as 'venv' to potato_launch_and_screenshot or potato_interact_and_record (optionally set 'launch_command'); those tools will run '<venv> && <launch_command>' for you.")
         }))]
-    elif name == "workspace_task_start":
+    elif name == "potato_task_start":
         command = arguments.get("command")
         if not command:
             raise ValueError("'command' is required")
@@ -1001,10 +972,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise RuntimeError("Container manager not initialized")
         info = cm.start_background_task(command, task_id, extra_env=env_map)
         import json as _json
-        payload = {"task_id": task_id, **info, "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to terminate if needed.")}
+        payload = {"task_id": task_id, **info, "hint": _with_progress_reminder("Use potato_task_status to poll, potato_task_output to tail logs, and potato_task_kill to terminate if needed.")}
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
-    elif name == "workspace_task_status":
+    elif name == "potato_task_status":
         task_id = arguments.get("task_id")
         if not task_id:
             raise ValueError("'task_id' is required")
@@ -1012,10 +983,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise RuntimeError("Container manager not initialized")
         status = cm.get_task_status(task_id)
         import json as _json
-        status["hint"] = _with_progress_reminder("If running=true, continue polling or use workspace_task_output to tail logs. When exit_code is not None, summarize results and surface artifacts.")
+        status["hint"] = _with_progress_reminder("If running=true, continue polling or use potato_task_output to tail logs. When exit_code is not None, summarize results and surface artifacts.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(status))]
-    elif name == "workspace_task_kill":
+    elif name == "potato_task_kill":
         task_id = arguments.get("task_id")
         sig = arguments.get("signal", "TERM")
         if not task_id:
@@ -1027,7 +998,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         result["hint"] = _with_progress_reminder("If the task doesn't stop, try signal=KILL. Then poll status again.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(result))]
-    elif name == "workspace_task_output":
+    elif name == "potato_task_output":
         task_id = arguments.get("task_id")
         tail = arguments.get("tail", 0)
         if not task_id:
@@ -1050,7 +1021,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import json as _json
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "content": out or "", "path": out_path, "hint": _with_progress_reminder("Show a concise excerpt (use tail for long logs) and offer to open or download if needed.")}))]
-    elif name == "workspace_task_list":
+    elif name == "potato_task_list":
         include_status = bool(arguments.get("include_status", False)) if isinstance(arguments, dict) else False
         # List files matching task_*.pid under tmp_scripts; derive task IDs
         probe = (
@@ -1096,7 +1067,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": exit_code, "output": output, "hint": _with_progress_reminder("If cloning succeeded, add the repo to your workspace context and consider listing files or opening README next.")}))]
     
-    elif name == "workspace_launch_and_screenshot":
+    elif name == "potato_launch_and_screenshot":
         data = LaunchAndScreenshotInput(**(arguments or {}))
         launch_command = data.launch_command
         delay = int(data.delay_seconds)
@@ -1172,7 +1143,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "Invoke individual tools directly in sequence instead."
         )
         return [TextContent(type="text", text=msg)]
-    elif name == "workspace_interact_and_record":
+    elif name == "potato_interact_and_record":
         import json
         # Parse and validate inputs using Pydantic schema
         parsed = InteractAndRecordInput(**(arguments or {}))
@@ -1451,7 +1422,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload["video_path"] = video_out
         payload["hint"] = _with_progress_reminder("Provide the video to the user; use 'video_path' at /workspace/.agent/screenshots/.")
         return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
-    elif name == "workspace_python_run_module":
+    elif name == "potato_python_run_module":
         data = PythonRunModuleInput(**(arguments or {}))
         venv = data.venv_path
         module = data.module
@@ -1473,16 +1444,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the module.")}))]
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use potato_task_status to poll, potato_task_output to tail logs, and potato_task_kill to stop the module.")}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done.")}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Module still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use potato_task_status to poll, potato_task_output to tail logs, and potato_task_kill to stop when done.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} module={module}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Use output to summarize the run results concisely.")}))]
-    elif name == "workspace_python_run_script":
+    elif name == "potato_python_run_script":
         data = PythonRunScriptInput(**(arguments or {}))
         venv = data.venv_path
         script_path = data.script_path
@@ -1505,16 +1476,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             info = container_manager.start_background_task(cmd, str(uuid.uuid4()))
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop the script.")}))]
+            return [TextContent(type="text", text=_json.dumps({"task_id": info.get("task_id"), "exit_code": info.get("exit_code"), "hint": _with_progress_reminder("Use potato_task_status to poll, potato_task_output to tail logs, and potato_task_kill to stop the script.")}))]
         timed_out, code, out = _exec_with_timeout(cmd, arguments=arguments)
         if timed_out:
             import json as _json
             record_tool_metric(name, int(__t.time()*1000) - __start_ms)
-            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use workspace_task_status to poll, workspace_task_output to tail logs, and workspace_task_kill to stop when done.")}))]
+            return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "Script still running; try again with a larger timeout or set background=true.", "hint": _with_progress_reminder("Set background=true to get a task_id, then use potato_task_status to poll, potato_task_output to tail logs, and potato_task_kill to stop when done.")}))]
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} script={script_path}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Use output to summarize the run results concisely.")}))]
-    elif name == "workspace_python_check_syntax":
+    elif name == "potato_python_check_syntax":
         data = PythonCheckSyntaxInput(**(arguments or {}))
         venv = data.venv_path
         src = data.source_path
@@ -1541,7 +1512,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code} src={src}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If exit_code is 0, the file is syntactically valid; otherwise surface the compile error lines.")}))]
-    elif name == "workspace_pytest_run":
+    elif name == "potato_pytest_run":
         data = PytestRunInput(**(arguments or {}))
         venv = data.venv_path
         args = data.args or []
@@ -1565,13 +1536,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         import json as _json
         logger.info(f"[req={req_id}] tool={name} completed exit_code={code}")
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Summarize pass/fail counts and point to failing tests if any.")}))]
-    elif name == "workspace_list_repositories":
+    elif name == "potato_list_repositories":
         import json
         if not cm:
             raise RuntimeError("Container manager not initialized")
         items = cm.list_local_repositories()
         return [TextContent(type="text", text=json.dumps({"items": items, "hint": _with_progress_reminder("Use these repository entries to navigate or run git operations; avoid dumping full repo trees inline.")}, ensure_ascii=False))]
-    elif name == "workspace_git_add":
+    elif name == "potato_git_add":
         repo_path = arguments.get("repo_path")
         paths = arguments.get("paths") or []
         if not repo_path:
@@ -1592,9 +1563,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=_json.dumps({
             "exit_code": code,
             "output": out,
-            "hint": _with_progress_reminder("Required next step: make a commit. If exit_code is 0, immediately run workspace_git_commit with a clear, concise message summarizing what changed and why.")
+            "hint": _with_progress_reminder("Required next step: make a commit. If exit_code is 0, immediately run potato_git_commit with a clear, concise message summarizing what changed and why.")
         }))]
-    elif name == "workspace_git_commit":
+    elif name == "potato_git_commit":
         repo_path = arguments.get("repo_path")
         message = arguments.get("message")
         all_flag = bool(arguments.get("all", False))
@@ -1615,7 +1586,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git pull still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds for slow networks or large updates.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If commit succeeded, summarize the commit message and next steps (push or create PR).")}))]
-    elif name == "workspace_git_push":
+    elif name == "potato_git_push":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
         branch = arguments.get("branch")
@@ -1649,7 +1620,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "gh view still running; try again with a larger timeout.", "hint": _with_progress_reminder("Increase timeout_seconds if the GitHub API is slow.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If push succeeded, share the branch and next steps (e.g., open PR). On failure, show the error and suggest pull/rebase.")}))]
-    elif name == "workspace_git_pull":
+    elif name == "potato_git_pull":
         repo_path = arguments.get("repo_path")
         remote = arguments.get("remote", "origin")
         branch = arguments.get("branch")
@@ -1671,7 +1642,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         code, out = cm.execute_command(cmd, str(uuid.uuid4()))
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If pull succeeded, summarize changes. If conflicts, advise resolving and committing.")}))]
-    elif name == "workspace_git_branch_create":
+    elif name == "potato_git_branch_create":
         repo_path = arguments.get("repo_path")
         bname = arguments.get("name")
         start = (arguments.get("start_point") or "").strip()
@@ -1701,7 +1672,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch create still running; increase timeout_seconds.", "hint": _with_progress_reminder("If creating from a remote start point, ensure you have fetched first.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If created successfully, begin committing changes on this branch.")}))]
-    elif name == "workspace_git_branch_delete":
+    elif name == "potato_git_branch_delete":
         repo_path = arguments.get("repo_path")
         bname = arguments.get("name")
         force = bool(arguments.get("force", False))
@@ -1721,7 +1692,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git branch delete still running; increase timeout_seconds.", "hint": _with_progress_reminder("Use force=true to delete an unmerged branch if you are certain.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If deletion succeeded, prune remote branches if needed and update any open PRs.")}))]
-    elif name == "workspace_git_merge":
+    elif name == "potato_git_merge":
         repo_path = arguments.get("repo_path")
         source = arguments.get("source_branch")
         target = (arguments.get("target_branch") or "").strip()
@@ -1761,7 +1732,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git merge still running; increase timeout_seconds.", "hint": _with_progress_reminder("Resolve conflicts if present, then commit the merge.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("If merge succeeded, summarize the merged changes and consider pushing the updated target branch if approved.")}))]
-    elif name == "workspace_git_checkout":
+    elif name == "potato_git_checkout":
         repo_path = arguments.get("repo_path")
         branch = arguments.get("branch")
         if not repo_path or not branch:
@@ -1805,7 +1776,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         payload["hint"] = _with_progress_reminder("Use repository data to navigate or clone; present key fields (name, description, default branch) to the user concisely.")
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps(payload))]
-    elif name == "workspace_git_status":
+    elif name == "potato_git_status":
         repo_path = arguments.get("repo_path")
         if not repo_path:
             raise ValueError("'repo_path' is required")
@@ -1823,7 +1794,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_json.dumps({"exit_code": None, "timeout_seconds": arguments.get("timeout_seconds", 120), "message": "git status still running; increase timeout_seconds.", "hint": _with_progress_reminder("Large repos may need more time.")}))]
         record_tool_metric(name, int(__t.time()*1000) - __start_ms)
         return [TextContent(type="text", text=_json.dumps({"exit_code": code, "output": out, "hint": _with_progress_reminder("Summarize the key changes (modified, added, deleted) and branch info for the user.")}))]
-    elif name == "workspace_git_diff":
+    elif name == "potato_git_diff":
         repo_path = arguments.get("repo_path")
         if not repo_path:
             raise ValueError("'repo_path' is required")

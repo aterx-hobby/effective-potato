@@ -13,7 +13,7 @@ async def test_workspace_select_venv_heuristics_and_shape():
         "projects/short/.venv",
     ]
 
-    res = await server.call_tool("workspace_select_venv", {"paths": candidates})
+    res = await server.call_tool("potato_select_venv", {"paths": candidates})
     # Response is a list of TextContent items with JSON payload
     assert isinstance(res, list) and res
     payload_text = res[0].text

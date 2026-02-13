@@ -37,7 +37,7 @@ async def test_launch_and_screenshot_self_contained_command(monkeypatch):
             },
         }
 
-        res = await server.call_tool("workspace_launch_and_screenshot", args)
+        res = await server.call_tool("potato_launch_and_screenshot", args)
         assert isinstance(res, list) and res, "Expected a non-empty TextContent list"
         data = json.loads(res[0].text)
         shot_path = data["screenshot_path"]
@@ -73,7 +73,7 @@ async def test_launch_and_screenshot_requires_launch_command():
     server.container_manager = fake
     try:
         with pytest.raises(ValueError):
-            await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
+            await server.call_tool("potato_launch_and_screenshot", {"delay_seconds": 1})
     finally:
         server.container_manager = orig_cm
 
@@ -91,7 +91,7 @@ async def test_launch_and_screenshot_missing_command_raises(monkeypatch):
     try:
         server.container_manager = fake
         with pytest.raises(Exception):
-            await server.call_tool("workspace_launch_and_screenshot", {"delay_seconds": 1})
+            await server.call_tool("potato_launch_and_screenshot", {"delay_seconds": 1})
     finally:
         server.container_manager = orig_cm
 
@@ -119,7 +119,7 @@ async def test_launch_and_screenshot_with_venv_prefixes_command(monkeypatch):
             "filename": "venv.png",
         }
 
-        res = await server.call_tool("workspace_launch_and_screenshot", args)
+        res = await server.call_tool("potato_launch_and_screenshot", args)
         assert isinstance(res, list) and res
         data = json.loads(res[0].text)
         shot_path = data["screenshot_path"]

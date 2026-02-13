@@ -2,7 +2,6 @@ import os
 import tempfile
 from pathlib import Path
 import uuid
-import json
 
 import pytest
 
@@ -48,12 +47,11 @@ async def test_tar_and_digest_end_to_end():
             cm.start_container()
             server.container_manager = cm
 
-            res = await server.call_tool("inspect_tools", {})
-            payload = json.loads(res[0].text)
-            names = {t["name"] for t in payload.get("tools", [])}
+            tools = await server.list_tools()
+            names = {t.name for t in tools}
 
-            assert "workspace_tar_create" not in names
-            assert "workspace_file_digest" not in names
+            assert "potato_tar_create" not in names
+            assert "potato_file_digest" not in names
         finally:
             try:
                 server.container_manager = orig_cm

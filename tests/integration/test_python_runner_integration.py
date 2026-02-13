@@ -54,9 +54,9 @@ async def test_python_run_script_in_container():
             )
             assert code == 0 and "READY" in out
 
-            # Run the script using the workspace_python_run_script tool
+            # Run the script using the potato_python_run_script tool
             res = await server.call_tool(
-                "workspace_python_run_script",
+                "potato_python_run_script",
                 {"venv_path": "proj/.venv", "script_path": "proj/hello.py"}
             )
             data = json.loads(res[0].text)

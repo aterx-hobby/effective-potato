@@ -19,7 +19,7 @@ async def test_python_check_syntax_builds_expected_command(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_python_check_syntax",
+            "potato_python_check_syntax",
             {"venv_path": ".venv", "source_path": "src/app.py"},
         )
         payload = json.loads(res[0].text)
@@ -37,7 +37,7 @@ async def test_workspace_pytest_run_builds_expected_command(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_pytest_run",
+            "potato_pytest_run",
             {"venv_path": "venv", "args": ["-q", "tests/test_example.py"]},
         )
         payload = json.loads(res[0].text)

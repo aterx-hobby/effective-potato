@@ -21,7 +21,7 @@ async def test_find_venvs_returns_activation_commands():
     orig_cm = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_find_venvs", {"path": "."})
+        res = await server.call_tool("potato_find_venvs", {"path": "."})
         assert isinstance(res, list) and res
         import json
         data = json.loads(res[0].text)

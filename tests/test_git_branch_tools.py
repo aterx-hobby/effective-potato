@@ -20,7 +20,7 @@ async def test_branch_create_checkout(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_branch_create",
+            "potato_git_branch_create",
             {"repo_path": "proj", "name": "feature/x", "checkout": True},
         )
         payload = json.loads(res[0].text)
@@ -38,7 +38,7 @@ async def test_branch_delete_force(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_branch_delete",
+            "potato_git_branch_delete",
             {"repo_path": "proj", "name": "old-topic", "force": True},
         )
         payload = json.loads(res[0].text)
@@ -66,7 +66,7 @@ async def test_merge_into_detected_upstream(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_merge",
+            "potato_git_merge",
             {"repo_path": "proj", "source_branch": "feature/y"},
         )
         payload = json.loads(res[0].text)
@@ -85,7 +85,7 @@ async def test_checkout_switch_branch(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_checkout",
+            "potato_git_checkout",
             {"repo_path": "proj", "branch": "feature/z"},
         )
         payload = json.loads(res[0].text)

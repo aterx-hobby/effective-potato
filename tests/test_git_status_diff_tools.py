@@ -19,7 +19,7 @@ async def test_workspace_git_status_porcelain(monkeypatch):
     orig = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_git_status", {"repo_path": "proj"})
+        res = await server.call_tool("potato_git_status", {"repo_path": "proj"})
         assert isinstance(res, list) and res
         assert "cd /workspace && cd -- 'proj' && git status --porcelain=v1 -b" in fake.last_cmd
         payload = json.loads(res[0].text)
@@ -37,7 +37,7 @@ async def test_workspace_git_diff_staged_name_only_with_paths(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_diff",
+            "potato_git_diff",
             {"repo_path": "proj", "staged": True, "name_only": True, "unified": 0, "paths": ["src/app.py", "README.md"]},
         )
         assert isinstance(res, list) and res

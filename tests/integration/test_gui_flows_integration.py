@@ -42,7 +42,7 @@ async def test_workspace_screenshot_integration():
             server.container_manager = cm
 
             # Request screenshot
-            res = await server.call_tool("workspace_screenshot", {"delay_seconds": 1})
+            res = await server.call_tool("potato_screenshot", {"delay_seconds": 1})
             data = json.loads(res[0].text)
             assert data.get("exit_code") == 0
             path = data.get("screenshot_path")
@@ -89,7 +89,7 @@ async def test_workspace_launch_and_screenshot_integration():
 
             # Launch a benign command (no GUI window required) and take a screenshot
             res = await server.call_tool(
-                "workspace_launch_and_screenshot",
+                "potato_launch_and_screenshot",
                 {"launch_command": "bash -lc 'echo started'", "delay_seconds": 1},
             )
             data = json.loads(res[0].text)
@@ -136,7 +136,7 @@ async def test_workspace_interact_and_record_integration():
             server.container_manager = cm
 
             res = await server.call_tool(
-                "workspace_interact_and_record",
+                "potato_interact_and_record",
                 {"inputs": [{"key_sequence": "Return", "delay": 0, "type": "once"}], "duration_seconds": 3, "frame_interval_ms": 500, "output_basename": "it_video"},
             )
             data = json.loads(res[0].text)

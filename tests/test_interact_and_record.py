@@ -33,7 +33,7 @@ async def test_interact_and_record_builds_script(monkeypatch):
             "output_basename": "rec_test",
         }
 
-        res = await server.call_tool("workspace_interact_and_record", args)
+        res = await server.call_tool("potato_interact_and_record", args)
         assert isinstance(res, list) and res, "Expected a response"
         data = json.loads(res[0].text)
         video_path = data["video_path"]
@@ -78,7 +78,7 @@ async def test_interact_and_record_optional_launch_with_venv(monkeypatch):
             "frame_interval_ms": 200,
             "output_basename": "short",
         }
-        res = await server.call_tool("workspace_interact_and_record", args)
+        res = await server.call_tool("potato_interact_and_record", args)
         assert isinstance(res, list) and res
         data = json.loads(res[0].text)
         video_path = data["video_path"]
@@ -118,7 +118,7 @@ async def test_interact_and_record_key_sequence_and_sleep(monkeypatch):
             "frame_interval_ms": 200,
             "output_basename": "session",
         }
-        res = await server.call_tool("workspace_interact_and_record", args)
+        res = await server.call_tool("potato_interact_and_record", args)
         assert isinstance(res, list) and res
         cmd = fake.last_command
         assert cmd is not None
@@ -156,7 +156,7 @@ async def test_interact_and_record_repeat_loops_until_end(monkeypatch):
             "frame_interval_ms": 200,
             "output_basename": "s",
         }
-        res = await server.call_tool("workspace_interact_and_record", args)
+        res = await server.call_tool("potato_interact_and_record", args)
         assert isinstance(res, list) and res
         cmd = fake.last_command
         assert cmd is not None
@@ -191,7 +191,7 @@ async def test_interact_min_delay_applied(monkeypatch):
             "frame_interval_ms": 100,
             "output_basename": "min",
         }
-        await server.call_tool("workspace_interact_and_record", args_once)
+        await server.call_tool("potato_interact_and_record", args_once)
         cmd = fake.last_command
         assert "xdotool key --delay 20 --clearmodifiers --window \"$active_id\" 'A'" in cmd
 
@@ -202,7 +202,7 @@ async def test_interact_min_delay_applied(monkeypatch):
             "frame_interval_ms": 100,
             "output_basename": "min",
         }
-        await server.call_tool("workspace_interact_and_record", args_rep)
+        await server.call_tool("potato_interact_and_record", args_rep)
         cmd = fake.last_command
         assert "xdotool key --delay 20 --clearmodifiers --window \"$active_id\" 'B'" in cmd
     finally:

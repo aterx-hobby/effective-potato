@@ -50,8 +50,8 @@ async def test_workspace_find_venvs_against_live_container():
             original = getattr(server, "container_manager", None)
             server.container_manager = cm
 
-            # Call workspace_find_venvs via the MCP server
-            res = await server.call_tool("workspace_find_venvs", {"path": "."})
+            # Call potato_find_venvs via the MCP server
+            res = await server.call_tool("potato_find_venvs", {"path": "."})
             assert isinstance(res, list) and res
             data = json.loads(res[0].text)
             roots = set(data.get("venv_roots", []))

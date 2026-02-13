@@ -22,7 +22,7 @@ async def test_block_git_init_at_workspace_root(monkeypatch):
         server.container_manager = fake
         # Direct init at root
         res = await server.call_tool(
-            "workspace_execute_command",
+            "potato_execute_command",
             {"command": "cd /workspace && git init"},
         )
         payload = json.loads(res[0].text)
@@ -37,7 +37,7 @@ async def test_block_git_init_at_workspace_root(monkeypatch):
             "git -C /workspace init",
             "cd /workspace && git init /workspace",
         ]:
-            res = await server.call_tool("workspace_execute_command", {"command": cmd})
+            res = await server.call_tool("potato_execute_command", {"command": cmd})
             payload = json.loads(res[0].text)
             assert payload["exit_code"] == 3
             assert payload.get("blocked") is True
@@ -55,7 +55,7 @@ async def test_allow_git_init_in_subdirectory(monkeypatch):
         server.container_manager = fake
         # Allowed: init in subdir under workspace
         res = await server.call_tool(
-            "workspace_execute_command",
+            "potato_execute_command",
             {"command": "cd /workspace && cd proj && git init"},
         )
         payload = json.loads(res[0].text)

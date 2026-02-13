@@ -14,13 +14,13 @@ async def test_file_review_and_search_tools_not_exposed():
     names = {t.name for t in tools}
 
     removed = {
-        "workspace_apply_patch",
-        "workspace_find",
-        "workspace_list_dir",
-        "workspace_read_file",
-        "workspace_write_file",
-        "workspace_tar_create",
-        "workspace_file_digest",
+        "potato_apply_patch",
+        "potato_find",
+        "potato_list_dir",
+        "potato_read_file",
+        "potato_write_file",
+        "potato_tar_create",
+        "potato_file_digest",
     }
     assert not (removed & names)
 

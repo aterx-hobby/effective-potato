@@ -30,7 +30,7 @@ task_456b.pid
     orig = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_task_list", {})
+        res = await server.call_tool("potato_task_list", {})
         payload = json.loads(res[0].text)
         assert payload["exit_code"] == 0
         assert payload["tasks"] == ["123a", "456b"]
@@ -48,7 +48,7 @@ async def test_workspace_task_list_with_status(monkeypatch):
     orig = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_task_list", {"include_status": True})
+        res = await server.call_tool("potato_task_list", {"include_status": True})
         payload = json.loads(res[0].text)
         assert payload["tasks"] == ["123a"]
         assert "statuses" in payload and "123a" in payload["statuses"]

@@ -19,7 +19,7 @@ async def test_workspace_git_push_requires_confirmation(monkeypatch):
     orig = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_git_push", {"repo_path": "proj"})
+        res = await server.call_tool("potato_git_push", {"repo_path": "proj"})
         payload = json.loads(res[0].text)
         assert payload["exit_code"] == 2
         assert "requires explicit approval" in payload["message"].lower()
@@ -36,7 +36,7 @@ async def test_workspace_git_push_with_confirmation(monkeypatch):
     try:
         server.container_manager = fake
         res = await server.call_tool(
-            "workspace_git_push",
+            "potato_git_push",
             {"repo_path": "proj", "remote": "origin", "branch": "main", "confirm": True},
         )
         payload = json.loads(res[0].text)

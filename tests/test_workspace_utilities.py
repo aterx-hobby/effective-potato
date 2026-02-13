@@ -22,7 +22,7 @@ async def test_screenshot_schema_validation_defaults(monkeypatch):
     try:
         server.container_manager = fake
         # Missing fields should be acceptable due to defaults
-        res = await server.call_tool("workspace_screenshot", {})
+        res = await server.call_tool("potato_screenshot", {})
         assert isinstance(res, list) and res
         assert "xfce4-screenshooter -f -s" in fake.last_cmd
     finally:

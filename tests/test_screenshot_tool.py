@@ -20,7 +20,7 @@ async def test_workspace_screenshot_builds_command(monkeypatch):
     orig_cm = getattr(server, "container_manager", None)
     try:
         server.container_manager = fake
-        res = await server.call_tool("workspace_screenshot", {"filename": "one.png", "delay_seconds": 1})
+        res = await server.call_tool("potato_screenshot", {"filename": "one.png", "delay_seconds": 1})
         assert isinstance(res, list) and res
         data = json.loads(res[0].text)
         shot_path = data["screenshot_path"]
@@ -55,6 +55,6 @@ async def test_workspace_screenshot_negative_delay_coerces_or_raises(monkeypatch
         server.container_manager = fake
         # Pydantic schema enforces ge=0; expect ValueError when negative
         with pytest.raises(Exception):
-            await server.call_tool("workspace_screenshot", {"delay_seconds": -1})
+            await server.call_tool("potato_screenshot", {"delay_seconds": -1})
     finally:
         server.container_manager = orig_cm

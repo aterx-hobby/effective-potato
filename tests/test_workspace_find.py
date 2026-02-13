@@ -7,7 +7,7 @@ async def test_workspace_find_not_exposed():
 
     tools = await server.list_tools()
     names = {t.name for t in tools}
-    assert "workspace_find" not in names
+    assert "potato_find" not in names
 
     with pytest.raises(ValueError):
-        await server.call_tool("workspace_find", {"path": "."})
+        await server.call_tool("potato_find", {"path": "."})

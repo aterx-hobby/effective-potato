@@ -162,11 +162,11 @@ All published tools expose JSON Schemas via `list_tools`.
 
 The following tools additionally validate/coerce inputs with Pydantic models:
 
-- workspace_screenshot
+- potato_screenshot
   - Inputs: { filename?: string, delay_seconds?: integer >= 0 }
   - Behavior: captures a fullscreen PNG into `/workspace/.agent/screenshots/<name>.png`. The tool returns `screenshot_path`; clients should surface or fetch the file as appropriate for their UI.
 
-- workspace_launch_and_screenshot
+- potato_launch_and_screenshot
   - Inputs: {
       launch_command: string (required),
       delay_seconds?: integer >= 0 (default: 2),
@@ -176,54 +176,51 @@ The following tools additionally validate/coerce inputs with Pydantic models:
     }
   - Behavior: launches the app, waits, and captures a fullscreen PNG.
 
-- workspace_interact_and_record
+- potato_interact_and_record
   - Inputs: { inputs: Array<{ key_sequence?: string, delay?: integer >= 0, type?: 'once'|'sleep'|'repeat' }>, launch_command?: string, venv?: string, duration_seconds?: integer >= 1, frame_interval_ms?: integer >= 10, output_basename?: string, working_dir?: string, env?: { [key: string]: string }, post_launch_delay_seconds?: integer >= 0 }
   - Behavior: optionally launches an app, sends key sequences, and records a WebM into `/workspace/.agent/recordings/`. Returns `video_path` plus window/probe info.
 
-- workspace_python_run_module
+- potato_python_run_module
   - Inputs: { venv_path: string (workspace-relative), module: string, args?: string[], background?: boolean }
   - Behavior: runs `python -m <module>` using `<venv_path>/bin/python` without activating the venv. If `background=true`, returns a task_id.
 
-- workspace_python_run_script
+- potato_python_run_script
   - Inputs: { venv_path: string (workspace-relative), script_path: string (workspace-relative), args?: string[], background?: boolean }
   - Behavior: runs `<venv_path>/bin/python '<script_path>'` without activating the venv. If `background=true`, returns a task_id.
 
-- workspace_python_check_syntax
+- potato_python_check_syntax
   - Inputs: { venv_path: string (workspace-relative), source_path: string (workspace-relative) }
   - Behavior: runs `python -m py_compile <source_path>` using `<venv_path>/bin/python`.
 
-- workspace_pytest_run
+- potato_pytest_run
   - Inputs: { venv_path: string (workspace-relative), args?: string[] }
   - Behavior: runs pytest using `<venv_path>/bin/python -m pytest`.
 
 Other published tools (schemas are defined inline and exposed via `list_tools`):
 
-- workspace_execute_command
+- potato_execute_command
   - Inputs: { command: string, timeout_seconds?: integer, env?: { [k: string]: string }, background?: boolean }
   - Behavior: runs an arbitrary bash command in the container. If `background=true`, returns a task id.
 
-- workspace_task_start / workspace_task_status / workspace_task_output / workspace_task_list / workspace_task_kill
+- potato_task_start / potato_task_status / potato_task_output / potato_task_list / potato_task_kill
   - Behavior: manage background processes started in the container.
 
-- workspace_list_repositories
+- potato_list_repositories
   - Behavior: list git repos tracked in the workspace.
 
-- workspace_select_venv
+- potato_select_venv
   - Inputs: { paths: string[] }
   - Behavior: select the best venv candidate and return an `activate` command.
 
-- workspace_find_venvs
+- potato_find_venvs
   - Inputs: { path?: string }
   - Behavior: searches under `path` (workspace-relative) for venv roots (e.g. `.venv`, `venv`, `*_env*`, and `bin/activate`). Returns `venv_roots` and `activations` (e.g. `source <root>/bin/activate`).
 
-- inspect_tools
-  - Behavior: return the currently published tools and schemas.
-
 Git tools:
 
-- workspace_git_add / workspace_git_commit / workspace_git_pull / workspace_git_push (approval-gated)
-- workspace_git_status / workspace_git_diff
-- workspace_git_checkout / workspace_git_branch_create / workspace_git_branch_delete / workspace_git_merge
+- potato_git_add / potato_git_commit / potato_git_pull / potato_git_push (approval-gated)
+- potato_git_status / potato_git_diff
+- potato_git_checkout / potato_git_branch_create / potato_git_branch_delete / potato_git_merge
 
 GitHub tools (only if `gh` is available in the container):
 
@@ -231,12 +228,12 @@ GitHub tools (only if `gh` is available in the container):
 - github_clone_repository
 
 Note: effective-potato intentionally does not publish general workspace file search/review/edit tools (glob/list/read/search/write/applyDiff).
-Coding agents typically already provide those primitives; this server focuses on container execution, git operations, and GUI automation. `workspace_find_venvs` is a special-case helper because other tools/workflows depend on quickly discovering venv roots.
+Coding agents typically already provide those primitives; this server focuses on container execution, git operations, and GUI automation. `potato_find_venvs` is a special-case helper because other tools/workflows depend on quickly discovering venv roots.
 
 
 For an MCP client, you can inspect each tool’s JSON Schema from the `list_tools` response to validate arguments before calling.
 
-#### execute_command (workspace_execute_command)
+#### execute_command (potato_execute_command)
 
 Execute a bash command in the sandboxed container.
 
@@ -253,63 +250,64 @@ Execute a bash command in the sandboxed container.
 **Example:**
 ```json
 {
-  "name": "workspace_execute_command",
+  "name": "potato_execute_command",
   "arguments": { "command": "ls -la /" }
 }
 
 {
-  "name": "workspace_execute_command",
+  "name": "potato_execute_command",
   "arguments": { "command": "uvicorn app:app", "background": true }
 }
 ```
 
 Follow-ups for background tasks:
-- `workspace_task_status` to poll for completion
-- `workspace_task_output` with `tail` to read logs
-- `workspace_task_kill` to stop the process
+- `potato_task_status` to poll for completion
+- `potato_task_output` with `tail` to read logs
+- `potato_task_kill` to stop the process
 
-#### list_repositories / clone_repository
+#### GitHub tools (github_get_repository / github_clone_repository)
 
-List GitHub repositories for a user or the authenticated user. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
+Get details for a GitHub repository. These tools are only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
 
 **Parameters:**
-- `owner` (string, optional): The username or organization to list repos for. If not provided, lists repos for the authenticated user.
-- `limit` (integer, optional): Maximum number of repositories to list (default: 30)
+- `owner` (string, required): The username or organization
+- `repo` (string, required): The repository name
 
 **Returns:**
-- Exit code and list of repositories
+- Exit code and repository details
 
 **Example:**
 ```json
 {
-  "name": "list_repositories",
+  "name": "github_get_repository",
   "arguments": {
     "owner": "octocat",
-    "limit": 10
+    "repo": "Hello-World"
   }
 }
 ```
 
-Clone a GitHub repository into the workspace directory. This tool is only available when `GITHUB_PERSONAL_ACCESS_TOKEN` is set in `local/.env`.
+Clone a GitHub repository into the workspace directory with `github_clone_repository`.
+
 ### Git workflow helpers
 
 Beyond add/commit/pull/push, the server exposes tools to review changes:
 
 - Review changes:
-  - `workspace_git_status` — machine-friendly status (porcelain)
-  - `workspace_git_diff` — pending or staged changes; use `name_only=true` for a quick file list
+  - `potato_git_status` — machine-friendly status (porcelain)
+  - `potato_git_diff` — pending or staged changes; use `name_only=true` for a quick file list
 
 - Safety on push:
-  - `workspace_git_push` is approval-gated; callers must set `confirm=true` and should obtain explicit user consent
+  - `potato_git_push` is approval-gated; callers must set `confirm=true` and should obtain explicit user consent
 
 ### Background tasks at a glance
 
-Any long-running command can be backgrounded via `workspace_execute_command` (background=true) or the Python runners. Manage them with:
+Any long-running command can be backgrounded via `potato_execute_command` (background=true) or the Python runners. Manage them with:
 
-- `workspace_task_list` — discover known tasks
-- `workspace_task_status` — poll until `running=false`
-- `workspace_task_output` — tail logs with `tail: 200`
-- `workspace_task_kill` — terminate with `signal: "TERM"` (or `"KILL"` if needed)
+- `potato_task_list` — discover known tasks
+- `potato_task_status` — poll until `running=false`
+- `potato_task_output` — tail logs with `tail: 200`
+- `potato_task_kill` — terminate with `signal: "TERM"` (or `"KILL"` if needed)
 
 ## Development
 
@@ -394,9 +392,9 @@ By default, the host workspace directory is `./workspace` (relative to the repo)
 export POTATO_WORKSPACE_DIR=/absolute/path/to/your/workspace
 ```
 
-The server mounts this path at `/workspace` inside the container. The `mcp.sh` review mode also uses this variable to find the readiness file at `$POTATO_WORKSPACE_DIR/.agent/potato_ready.json`.
+The server mounts this path at `/workspace` inside the container and writes a readiness file at `$POTATO_WORKSPACE_DIR/.agent/potato_ready.json`.
 
-To enable GitHub CLI tools (`list_repositories` and `clone_repository`), add your GitHub Personal Access Token to the `local/.env` file:
+To enable GitHub CLI tools (`github_get_repository` and `github_clone_repository`), add your GitHub Personal Access Token to the `local/.env` file:
 
 ```bash
 GITHUB_PERSONAL_ACCESS_TOKEN=your_token_here
